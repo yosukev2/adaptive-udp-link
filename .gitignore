@@ -53,3 +53,9 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+# 再生成可能なビルド生成物・中間生成物・実行ログは成果物として追跡しない
+bin/
+build/
+logs/*.log
+logs/run_*/
