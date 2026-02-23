@@ -50,6 +50,7 @@ make run60
 ## Issue別ドキュメント
 
 - `docs/issues/W01_ISSUE_02_scaffold_cli.md`
+- `docs/issues/W01_ISSUE_03_frame_v0.md`
 
 ## 今後の進め方（W01の例）
 
