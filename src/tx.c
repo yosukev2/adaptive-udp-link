@@ -1,18 +1,13 @@
 // src/tx.c
 //
-// このファイルの役割（#2時点）:
-//   - tx 実行ファイルとして起動できること
-//   - CLI引数を受け取れること（usageを出せること）
-//   - ログファイルに開始/終了を書けること
+// UDP送信器（tx）の実装。
+// 主な責務:
+//   - CLI引数の解析（送信先IP/port, rate_hz, duration_sec, log_path）
+//   - 送信ソケットの初期化
+//   - FrameV0 に seq / timestamp_ns を設定して UDP送信
+//   - 実行ログ（start / summary / end）の出力
 //
-// まだやらないこと（#2では範囲外）:
-//   - UDPソケット送信
-//   - seq付与
-//   - timestamp付与
-//
-// なぜこの段階でスタブ（仮実装）を作るのか:
-//   後続 issue で毎回同じ手順で「起動」「ログ確認」ができる土台を先に固定するため。
-//   計測系は手順の再現性が命。
+// 詳細な設計意図・テスト手順・イシューごとの差分は docs/ に記録する。
 
 #include <errno.h>    // errno（エラー原因の保持）
 #include <getopt.h>   // getopt_long（長い形式のCLI引数解析: --dst-ip など）
@@ -21,6 +16,9 @@
 #include <string.h>   // 文字列処理（今回は直接は少なめだが将来使いやすい）
 #include <time.h>     // time, localtime_r, strftime（ログの時刻表示）
 #include <unistd.h>   // sleep
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
 #include "frame.h"
 // 設定値をまとめる構造体
@@ -108,6 +106,44 @@ static void write_log_line(FILE *fp, const char *level, const char *msg) {
 
     fprintf(fp, "%s [%s] %s\n", ts, level, msg);
     fflush(fp);
+}
+
+static int now_monotonic_ns(uint64_t *out_ns) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+        return -1;
+    }
+    *out_ns = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+    return 0;
+}
+
+static int build_dst_addr(const char *ip, int port, struct sockaddr_in *out) {
+    memset(out, 0, sizeof(*out));
+    out->sin_family = AF_INET;
+    out->sin_port = htons((uint16_t)port);
+
+    int rc = inet_pton(AF_INET, ip, &out->sin_addr);
+    if (rc != 1) {
+        if (rc == 0) {
+            fprintf(stderr, "Invalid IPv4 address: %s\n", ip);
+        } else {
+            perror("inet_pton");
+        }
+        return -1;
+    }
+    return 0;
+}
+
+static void timespec_add_ns(struct timespec *t, uint64_t ns) {
+    t->tv_sec  += ns / 1000000000LL;
+    t->tv_nsec += ns % 1000000000LL;
+    if (t->tv_nsec >= 1000000000L) {
+        t->tv_sec += 1;
+        t->tv_nsec -= 1000000000L;
+    } else if (t->tv_nsec < 0) {
+        t->tv_sec -= 1;
+        t->tv_nsec += 1000000000L;
+    }
 }
 
 int main(int argc, char **argv) {
@@ -237,11 +273,119 @@ int main(int argc, char **argv) {
 
     // #2ではまだ送信ループを作らないので、実行時間分だけ待機して終了する
     // #4でここが「固定レート送信ループ」に置き換わる予定
-    sleep((unsigned int)cfg.duration_sec);
+    // sleep((unsigned int)cfg.duration_sec);
+    
+    
+    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0) {
+        perror("socket");
+        fclose(fp);
+        return 1;  // または exit(EXIT_FAILURE);
+    }
+    struct sockaddr_in dest = {0};
+    if (build_dst_addr(cfg.dst_ip, cfg.dst_port, &dest) != 0) {
+        fclose(fp);
+        close(sock);
+        return 1;
+    }
 
+    FrameV0 frame; // 送信するフレーム（#2では内容はまだ入れない）
+    memset(&frame, 0, sizeof(frame));
+
+    struct timespec next;
+    int rc;
+    rc = clock_gettime(CLOCK_MONOTONIC, &next);
+    if (rc != 0) {
+        perror("clock_gettime");
+        close(sock);
+        fclose(fp);
+        return 1;
+    }
+
+    uint64_t period_ns = 1000000000ULL / (uint64_t)cfg.rate_hz;
+    uint64_t t_start_ns = 0;
+    if (now_monotonic_ns(&t_start_ns) != 0) {
+        perror("clock_gettime");
+        close(sock);
+        fclose(fp);
+        return 1;
+    }
+
+    if (t_start_ns == 0) {
+        close(sock);
+        fclose(fp);
+        return 1;
+    }
+    uint32_t seq = 0; // ダミーシーケンス番号（実際には送信ループ内でインクリメントするが、#2ではまだやらない）
+    uint32_t n = 0; // ダミーシーケンス番号（実際には送信ループ内でインクリメントするが、#2ではまだやらない）
+
+    uint64_t now = 0;
+    if (now_monotonic_ns(&now) != 0) {
+        perror("clock_gettime");
+        close(sock);
+        fclose(fp);
+        return 1;
+    }
+
+    while (now - t_start_ns < (uint64_t)cfg.duration_sec * 1000000000ULL) {
+
+        timespec_add_ns(&next, (uint64_t)period_ns);
+        clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, NULL);
+        if (now_monotonic_ns(&now) != 0) {
+            write_log_line(fp, "ERROR", "clock_gettime failed");
+            break;
+        }
+        memset(&frame, 0, sizeof(frame));
+        uint64_t tx_ts = 0;
+        if (now_monotonic_ns(&tx_ts) != 0) {
+            write_log_line(fp, "ERROR", "clock_gettime failed before send");
+            break;
+        }
+
+        frame.seq = seq;
+        frame.timestamp_ns = tx_ts;
+        ssize_t sent =sendto(sock, &frame, sizeof(frame), 0, (struct sockaddr *)&dest, sizeof(dest)); // ダミー送信（実際にはソケットと宛先が必要だが、#2ではまだやらない）
+        if (sent < 0) {
+            perror("sendto");
+            write_log_line(fp, "ERROR", "sendto failed");
+            break;
+        }
+
+        if ((size_t)sent != sizeof(frame)) {
+            write_log_line(fp, "ERROR", "sendto returned unexpected size");
+            break;
+        }
+        seq++;
+        n++;
+    }
+    close(sock);
+    
+    uint64_t t_end_ns = 0;
+    if (now_monotonic_ns(&t_end_ns) != 0) {
+        perror("clock_gettime");
+        fclose(fp);
+        return 1;
+    }
+
+    uint64_t elapsed_ns = (t_end_ns > t_start_ns) ? (t_end_ns - t_start_ns) : 0;
+
+    double avg_rate = 0.0;
+    if (elapsed_ns > 0) {
+        avg_rate = (double)n / ((double)elapsed_ns / 1e9);
+    }
+
+    snprintf(buf, sizeof(buf),
+            "tx summary sent=%u last_seq=%u elapsed_sec=%.3f avg_rate_hz=%.2f",
+            (unsigned)n,
+            (unsigned)(seq == 0 ? 0 : (seq - 1)),
+            (double)elapsed_ns / 1e9,
+            avg_rate);
+    write_log_line(fp, "INFO", buf);
+    
     write_log_line(fp, "INFO", "tx end");
     fclose(fp);
 
     printf("tx finished\n");
+    
     return 0;
 }
