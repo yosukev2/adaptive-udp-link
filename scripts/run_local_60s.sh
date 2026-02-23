@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+#
+# run_local_60s.sh
+#
+# 目的:
+#   - #2のAC「60秒実行のスクリプトがある」を満たす
+#   - 後続 issue でも同じ手順で60秒安定性を確認できるようにする
+#
+# 10秒版とほぼ同じ構造にしている理由:
+#   手順差分を最小化して、比較や保守を楽にするため。
+#   （差分は duration と run_dir suffix 程度）
+
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT_DIR"
+
+TS="$(date +%Y%m%d_%H%M%S)"
+RUN_DIR="logs/run_${TS}_60s"
+mkdir -p "$RUN_DIR"
+
+RX_LOG="$RUN_DIR/rx.log"
+TX_LOG="$RUN_DIR/tx.log"
+
+echo "[INFO] run dir: $RUN_DIR"
+
+# 受信側を先に起動（本実装時の取りこぼし防止）
+./bin/rx --bind-ip 127.0.0.1 --port 9000 --duration-sec 60 --log-path "$RX_LOG" &
+RX_PID=$!
+
+# 起動安定化のための待機
+sleep 1
+
+# 送信側を起動（#2時点ではスタブ）
+./bin/tx --dst-ip 127.0.0.1 --dst-port 9000 --rate-hz 100 --duration-sec 60 --log-path "$TX_LOG"
+
+# 受信側終了待ち
+wait "$RX_PID" || true
+
+echo "[INFO] finished"
+echo "[INFO] logs:"
+ls -l "$RUN_DIR"
