@@ -22,6 +22,7 @@
 #include <time.h>     // time, localtime_r, strftime（ログの時刻表示）
 #include <unistd.h>   // sleep
 
+#include "frame.h"
 // 設定値をまとめる構造体
 //
 // なぜ構造体にまとめるのか:
@@ -212,6 +213,19 @@ int main(int argc, char **argv) {
 
     // 起動ログを書き込む
     char buf[256];
+
+    
+    // Frame v0 の共有定義が見えていることを、起動時ログで確認できるようにする
+    snprintf(buf, sizeof(buf),
+             "frame_v0 sizeof=%zu payload_bytes=%d offsets(seq=%zu ts=%zu payload=%zu)",
+             sizeof(FrameV0),
+             FRAME_V0_PAYLOAD_BYTES,
+             offsetof(FrameV0, seq),
+             offsetof(FrameV0, timestamp_ns),
+             offsetof(FrameV0, payload));
+    write_log_line(fp, "INFO", buf);
+    
+
     snprintf(buf, sizeof(buf),
              "tx start dst=%s:%d rate_hz=%d duration_sec=%d",
              cfg.dst_ip, cfg.dst_port, cfg.rate_hz, cfg.duration_sec);

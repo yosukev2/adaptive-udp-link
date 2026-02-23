@@ -20,6 +20,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "frame.h"
 // 受信側の設定をまとめる構造体
 //
 // bind_ip をポインタにしている理由は tx.c と同じ。
@@ -121,6 +122,17 @@ int main(int argc, char **argv) {
     }
 
     char buf[256];
+
+    // Frame v0 の共有定義が見えていることを、起動時ログで確認できるようにする
+    snprintf(buf, sizeof(buf),
+             "frame_v0 sizeof=%zu payload_bytes=%d offsets(seq=%zu ts=%zu payload=%zu)",
+             sizeof(FrameV0),
+             FRAME_V0_PAYLOAD_BYTES,
+             offsetof(FrameV0, seq),
+             offsetof(FrameV0, timestamp_ns),
+             offsetof(FrameV0, payload));
+    write_log_line(fp, "INFO", buf);
+    
     snprintf(buf, sizeof(buf),
              "rx start bind=%s:%d duration_sec=%d",
              cfg.bind_ip, cfg.port, cfg.duration_sec);
