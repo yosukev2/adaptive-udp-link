@@ -3,23 +3,25 @@
 // 役割
 //   - UDP受信プログラム（rx）のエントリポイント
 //   - CLI引数の解析（bind-ip / port / duration-sec / log-path）
-//   - ログ出力（start / progress / end）
-//   - 受信ループの土台（待機・受信・終了条件の管理）
+//   - poll ベースの受信ループ
+//   - FrameV0 サイズ確認と最小統計の算出（latency平均 / seq差分ベース欠損推定 / 重複 / 逆順）
+//   - ログ出力（start / summary / end）
 //
 // このファイルが担当すること
 //   - UDPソケット生成 / bind / 受信待機 / recvfrom
 //   - 実行時間管理（duration_sec）
-//   - 受信イベントとタイムアウトイベントの分岐
+//   - 受信イベント / タイムアウト / シグナル割込みの処理
+//   - FrameV0 を前提にした最小統計の集計と summary ログ出力
 //
 // このファイルが担当しないこと（別段階/別責務）
-//   - Frame内容の高度な検証（version/magic等）
-//   - latency / drop / percentile 統計算出
-//   - 可視化やCSV集計
+//   - Frame内容の高度な検証（magic/version/checksum 等）
+//   - 高度な統計（P95/P99, ヒストグラム, ジッタ詳細）
+//   - CSV出力 / 可視化 / オフライン集計
 //
-// 注意
-//   - 受信データはバイナリ（文字列ではない）として扱う
-//   - 時間計測は CLOCK_MONOTONIC を使う
-//   - 詳細な目的/AC/テスト手順は docs/issues/ の各MDを参照
+// 計測の前提と限界（重要）
+//   - latency = recv_now(CLOCK_MONOTONIC) - frame.timestamp_ns
+//   - このlatencyは同一マシン/同一クロック系である前提で意味を持つ
+//   - UDPは順序保証がないため、seq差分ベースの欠損は「推定値」
 #include <errno.h>
 #include <getopt.h>
 #include <stdio.h>
@@ -35,12 +37,13 @@
 #include <stddef.h>
 #include <inttypes.h>
 #include <signal.h>
+#include <stdbool.h>
 
 #include "frame.h"
 
 static volatile sig_atomic_t g_stop_requested = 0;
 
-static void on_sigint(int signo) {
+static void on_stop_signal(int signo) {
     (void)signo;
     g_stop_requested = 1;
 }
@@ -48,7 +51,7 @@ static void on_sigint(int signo) {
 static int install_signal_handlers(void) {
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
-    sa.sa_handler = on_sigint;
+    sa.sa_handler = on_stop_signal;
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = 0;  // SA_RESTARTなし（pollをEINTRで返しやすくする）
 
@@ -67,7 +70,7 @@ static int install_signal_handlers(void) {
 typedef struct {
     const char *bind_ip;   // bind先IP（例: "127.0.0.1" / "0.0.0.0"）
     int port;              // bindポート
-    int duration_sec;      // 実行時間（#2では待機時間として使う）
+    int duration_sec;      // 実行時間（実行時間（受信ループの終了条件））
     const char *log_path;  // ログファイルパス
 } RxConfig;
 
@@ -192,7 +195,7 @@ int main(int argc, char **argv) {
         fclose(fp);
         return 1;
     }
-    
+
     char buf[256];
 
     // Frame v0 の共有定義が見えていることを、起動時ログで確認できるようにする
@@ -213,8 +216,6 @@ int main(int argc, char **argv) {
     printf("rx started: bind=%s:%d duration=%d log=%s\n",
            cfg.bind_ip, cfg.port, cfg.duration_sec, cfg.log_path);
 
-    // #2では受信ループの代わりに待機だけする
-    // #5でここが select/poll ベースの受信ループに置き換わる予定
         
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0) {
@@ -262,7 +263,9 @@ int main(int argc, char **argv) {
         return 1;
     }
     // 起動ログを書き込む
+    FrameV0 frame;
     uint8_t buf_udp[sizeof(FrameV0)];
+
     char msg[256];
     ssize_t n = 0;
     struct sockaddr_in src_addr;
@@ -270,6 +273,22 @@ int main(int argc, char **argv) {
     uint64_t rx_recv_ok = 0;
     uint64_t rx_bad_size = 0;
     uint64_t rx_poll_timeout = 0;
+
+    uint32_t prev_seq = 0; 
+    bool has_prev_seq = false; 
+
+    uint64_t gap_cnt = 0;
+    uint64_t dup_cnt = 0;
+    uint64_t reord_cnt = 0;
+
+    uint64_t latency_sum_ns = 0;
+    uint64_t latency_sample_cnt = 0;
+    uint64_t future_ts_cnt = 0;
+
+    uint64_t recv_now_ns = 0;
+
+    unsigned int future_ts_detected = 0;
+
     while (1) {
         if (g_stop_requested) {
             write_log_line(fp, "INFO", "stop requested by signal");
@@ -283,7 +302,7 @@ int main(int argc, char **argv) {
             write_log_line(fp, "INFO", "duration elapsed, exiting");
             break;
         }
-        int ret = poll(&pfd, 1, timeout_sec*1000ULL);
+        int ret = poll(&pfd, 1, timeout_sec*1000);
         if (ret < 0) {
             if (errno == EINTR) {
                 if (g_stop_requested) {
@@ -306,7 +325,15 @@ int main(int argc, char **argv) {
         else if ( pfd.revents & POLLIN) {
             socklen_t src_len = sizeof(src_addr);
             n = recvfrom(sock, buf_udp, sizeof(buf_udp), 0, (struct sockaddr *)&src_addr, &src_len);
+            
             if (n < 0) {
+                if (errno == EINTR) {
+                    if (g_stop_requested) {
+                        write_log_line(fp, "INFO", "recvfrom interrupted by signal");
+                        break;
+                    }
+                    continue;
+                }
                 perror("recvfrom");
                 break;
             }
@@ -317,14 +344,42 @@ int main(int argc, char **argv) {
                 write_log_line(fp, "WARN", msg);
                 continue;
             }
-            
-            // for (ssize_t i = 0; i < n; i++) {
-            //     printf("%02X ", (unsigned)buf_udp[i]);
-            // }
-            // printf("\n");
+            if (now_monotonic_ns(&recv_now_ns) != 0) {
+                write_log_line(fp, "ERROR", "clock_gettime failed");
+                break;
+            }
+            memcpy(&frame, buf_udp, sizeof(frame));
+            // seq差分ベースの欠損推定（UDPなので推定値）
+            // - 前進: gapを加算
+            // - 重複: dupとして計上（gapには入れない）
+            // - 逆順: reorderとして計上（gapには入れない）
+            //   ※逆順でprev_seqを更新すると後続の推定を崩しやすい
+            if (has_prev_seq){
+                if (prev_seq == frame.seq) {
+                    dup_cnt++;
+                } else if (prev_seq < frame.seq) {// W01では seq wrap-around（uint32_t周回）は未対応
+                    gap_cnt += frame.seq - prev_seq - 1;
+                    prev_seq = frame.seq;
+                } else if (frame.seq < prev_seq) {
+                    reord_cnt++;
+                }
+            }else {
+                has_prev_seq = true;
+                prev_seq = frame.seq;
+            } 
+
+            if (recv_now_ns >= frame.timestamp_ns) {
+                latency_sum_ns += (recv_now_ns - frame.timestamp_ns);
+                latency_sample_cnt++;
+            } else {
+                future_ts_cnt++;
+            }
+            if (recv_now_ns < frame.timestamp_ns) {
+                future_ts_detected = 1;
+            }
             rx_recv_ok++;
-            // snprintf(msg, sizeof(msg), "recv %zd bytes", n);
-            // write_log_line(fp, "INFO", msg);
+
+
         }
     }
 
@@ -338,10 +393,11 @@ int main(int argc, char **argv) {
     snprintf(msg, sizeof(msg),
             "rx summary recv_any=%" PRIu64 " recv_ok=%" PRIu64
             " bad_size=%" PRIu64 " poll_timeout=%" PRIu64
-            " elapsed_ms=%" PRIu64,
+            " elapsed_ms=%" PRIu64 " avg_latency_ms=%.3f gap_cnt=%" PRIu64 " dup_cnt=%" PRIu64 " future_ts_cnt=%" PRIu64 " future_ts_detected=%u",
             rx_recv_any, rx_recv_ok, rx_bad_size, rx_poll_timeout,
-            elapsed_ns / 1000000);
+            elapsed_ns / 1000000, (latency_sample_cnt > 0 ? (double)latency_sum_ns / latency_sample_cnt / 1000000.0 : 0.0),  gap_cnt, dup_cnt, reord_cnt, future_ts_cnt, future_ts_detected);
     write_log_line(fp, "INFO", msg);
+
     write_log_line(fp, "INFO", "rx end");
     fclose(fp);
     close(sock);
