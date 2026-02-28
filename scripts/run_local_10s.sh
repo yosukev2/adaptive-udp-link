@@ -36,7 +36,11 @@ RUN_DIR="logs/run_${TS}_10s"
 mkdir -p "$RUN_DIR"
 
 # tx/rx のログファイルパスを固定
+
 RX_LOG="$RUN_DIR/rx.log"
+RX_CSV_IN_1SEC_LOG="$RUN_DIR/rx_in_1sec.csv"
+RX_CSV_BY_1RECV_LOG="$RUN_DIR/rx_by_1recv.csv"
+
 TX_LOG="$RUN_DIR/tx.log"
 
 echo "[INFO] run dir: $RUN_DIR"
@@ -48,7 +52,7 @@ echo "[INFO] run dir: $RUN_DIR"
 #   本実装になった時、先にtxを起動すると最初のパケットを取りこぼしやすい。
 #
 # "&" を付けるとバックグラウンド実行になる。
-./bin/rx --bind-ip 127.0.0.1 --port 9000 --duration-sec 10 --log-path "$RX_LOG" &
+./bin/rx --bind-ip 127.0.0.1 --port 9000 --duration-sec 10 --log-path "$RX_LOG"  --csv-in-1sec-log-path "$RX_CSV_IN_1SEC_LOG" --csv-by-1recv-log-path "$RX_CSV_BY_1RECV_LOG" &
 RX_PID=$!
 
 # $! は「直前に起動したバックグラウンドプロセスのPID」

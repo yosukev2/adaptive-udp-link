@@ -16,7 +16,7 @@
 // このファイルが担当しないこと（別段階/別責務）
 //   - Frame内容の高度な検証（magic/version/checksum 等）
 //   - 高度な統計（P95/P99, ヒストグラム, ジッタ詳細）
-//   - CSV出力 / 可視化 / オフライン集計
+//   - 可視化 / オフライン集計
 //
 // 計測の前提と限界（重要）
 //   - latency = recv_now(CLOCK_MONOTONIC) - frame.timestamp_ns
@@ -72,11 +72,26 @@ typedef struct {
     int port;              // bindポート
     int duration_sec;       // 実行時間（受信ループの終了条件）
     const char *log_path;  // ログファイルパス
+    const char *csv_in_1sec_log_path;  // １秒ごとの統計ログ（rx_stats）をCSV形式で出力する場合のファイルパス（オプション、未指定ならCSV出力しない）
+    const char *csv_by_1recv_log_path;  // 受信ごとの統計ログ（rx_stats）をCSV形式で出力する場合のファイルパス（オプション、未指定ならCSV出力しない）
 } RxConfig;
+
+typedef struct {
+    uint64_t recv_any;
+    uint64_t recv_ok;
+    uint64_t gap_cnt;
+    uint64_t dup_cnt;
+    uint64_t reord_cnt;
+    uint64_t latency_sum_ns;
+    uint64_t latency_sample_cnt;
+    uint64_t latency_max_ns;
+    uint64_t latency_min_ns;
+} WindowStats;
+
 
 static void print_usage(const char *prog) {
     fprintf(stderr,
-            "Usage: %s --bind-ip <ip> --port <port> --duration-sec <sec> --log-path <path>\n",
+            "Usage: %s --bind-ip <ip> --port <port> --duration-sec <sec> --log-path <path> [--csv-in-1sec-log-path <path>] [--csv-by-1recv-log-path <path>]\n",
             prog);
 }
 
@@ -100,6 +115,8 @@ static void write_log_line(FILE *fp, const char *level, const char *msg) {
     fprintf(fp, "%s [%s] %s\n", ts, level, msg);
     fflush(fp);
 }
+
+
 static int now_monotonic_ns(uint64_t *out_ns) {
     struct timespec ts;
     if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
@@ -144,6 +161,8 @@ int main(int argc, char **argv) {
         {"port", required_argument, 0, 2},
         {"duration-sec", required_argument, 0, 3},
         {"log-path", required_argument, 0, 4},
+        {"csv-in-1sec-log-path", required_argument, 0, 5},
+        {"csv-by-1recv-log-path", required_argument, 0, 6},
         {0, 0, 0, 0}
     };
 
@@ -173,6 +192,14 @@ int main(int argc, char **argv) {
                 cfg.log_path = optarg;
                 break;
 
+            case 5:
+                cfg.csv_in_1sec_log_path = optarg;
+                break;
+
+            case 6:
+                cfg.csv_by_1recv_log_path = optarg;
+                break;
+
             default:
                 print_usage(argv[0]);
                 return 1;
@@ -190,9 +217,38 @@ int main(int argc, char **argv) {
         perror("fopen(log_path)");
         return 1;
     }
+
+    FILE *csv_in_1sec_fp = NULL;
+    if (cfg.csv_in_1sec_log_path) {
+        csv_in_1sec_fp = fopen(cfg.csv_in_1sec_log_path, "w");
+        if (!csv_in_1sec_fp) {
+            perror("fopen(csv_in_1sec_log_path)");
+            fclose(fp);
+            return 1;
+        }
+        fprintf(csv_in_1sec_fp, "elapsed_sec,avg_latency_ms,max_latency_ms,min_latency_ms,recv_cnt,ok_recv_cnt,gap_cnt,dup_cnt,reord_cnt\n");
+        fflush(csv_in_1sec_fp);
+    }
+
+    FILE *csv_by_1recv_fp = NULL;
+    if (cfg.csv_by_1recv_log_path) {
+        csv_by_1recv_fp = fopen(cfg.csv_by_1recv_log_path, "w");
+        if (!csv_by_1recv_fp) {
+            perror("fopen(csv_by_1recv_log_path)");
+            fclose(fp);
+            if (csv_in_1sec_fp) fclose(csv_in_1sec_fp);
+            return 1;
+        }
+        fprintf(csv_by_1recv_fp, "rcv_time_ns,seq,send_time_ns,latency_ns,missing_delta\n");
+        fflush(csv_by_1recv_fp);
+    }
+
+
     if (install_signal_handlers() != 0) {
         perror("sigaction");
         fclose(fp);
+        if (csv_in_1sec_fp) fclose(csv_in_1sec_fp);
+        if (csv_by_1recv_fp) fclose(csv_by_1recv_fp);
         return 1;
     }
 
@@ -216,11 +272,19 @@ int main(int argc, char **argv) {
     printf("rx started: bind=%s:%d duration=%d log=%s\n",
            cfg.bind_ip, cfg.port, cfg.duration_sec, cfg.log_path);
 
-        
+    if (csv_in_1sec_fp) {
+        printf("csv_in_1sec_log_path=%s\n", cfg.csv_in_1sec_log_path);
+    }
+    if (csv_by_1recv_fp) {
+        printf("csv_by_1recv_log_path=%s\n", cfg.csv_by_1recv_log_path);
+    }
+    
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0) {
         perror("socket");
         fclose(fp);
+        if (csv_in_1sec_fp) fclose(csv_in_1sec_fp);
+        if (csv_by_1recv_fp) fclose(csv_by_1recv_fp);
         return 1;  // または exit(EXIT_FAILURE);
     }
 
@@ -233,6 +297,8 @@ int main(int argc, char **argv) {
     if (build_bind_addr(cfg.bind_ip, cfg.port, &bind_addr) != 0) {
         close(sock);
         fclose(fp);
+        if (csv_in_1sec_fp) fclose(csv_in_1sec_fp);
+        if (csv_by_1recv_fp) fclose(csv_by_1recv_fp);
         return 1;
     }
 
@@ -240,6 +306,8 @@ int main(int argc, char **argv) {
         perror("bind");
         close(sock);
         fclose(fp);
+        if (csv_in_1sec_fp) fclose(csv_in_1sec_fp);
+        if (csv_by_1recv_fp) fclose(csv_by_1recv_fp);
         return 1;
     }
 
@@ -254,13 +322,14 @@ int main(int argc, char **argv) {
     uint8_t buf_udp[sizeof(FrameV0)];
 
     char msg[256];
+    char msg_csv_1sec[256];
+    char msg_csv_by_1recv[256];
+
     ssize_t n = 0;
     struct sockaddr_in src_addr;
     uint64_t rx_recv_any = 0;
     uint64_t rx_recv_ok = 0;
     
-    uint64_t rx_recv_any_in_1sec = 0;
-    uint64_t rx_recv_ok_in_1sec = 0;
 
 
     uint64_t rx_bad_size = 0;
@@ -273,9 +342,7 @@ int main(int argc, char **argv) {
     uint64_t dup_cnt = 0;
     uint64_t reord_cnt = 0;
 
-    uint64_t gap_cnt_in_1sec = 0;
-    uint64_t dup_cnt_in_1sec = 0;
-    uint64_t reord_cnt_in_1sec = 0;
+    uint64_t gap = 0;
 
 
     uint64_t latency_sum_ns = 0;
@@ -287,23 +354,28 @@ int main(int argc, char **argv) {
     int wait_ms = 0;
 
     uint64_t latency = 0;
-    uint64_t latency_sample_cnt_in_1sec = 0;
-    uint64_t latency_sum_ns_in_1sec = 0;
+    uint64_t min_latency_ns = 0;
+    uint64_t max_latency_ns = 0;
 
-    uint64_t avg_latency_ns_in_1sec = 0;
-    uint64_t max_latency_ns_in_1sec = 0;
-    uint64_t min_latency_ns_in_1sec = 0;
 
     uint64_t next_stats_ns = 0; // 1秒ごとに統計ログ出力
     uint64_t now_for_stats = 0; // 1秒ごとに統計ログ出力
 
-    uint64_t avg_latency_ns = 0;
-    uint64_t max_latency_ns = 0;
-    uint64_t min_latency_ns = 0;
+    uint64_t avg_latency_ns_in_1sec = 0;
+
+    WindowStats win_stats[2] = {0};
+    int win_idx = 0;
+    int target_idx = 0;
+    int cur_idx = 0;
 
 
     if (now_monotonic_ns(&t_start_ns) != 0) {
         write_log_line(fp, "ERROR", "clock_gettime failed");
+        close(sock);
+        fclose(fp);
+        if (csv_in_1sec_fp) fclose(csv_in_1sec_fp);
+        if (csv_by_1recv_fp) fclose(csv_by_1recv_fp);
+        return 1;
     }
     
     next_stats_ns = t_start_ns + 1000000000ULL;
@@ -319,13 +391,6 @@ int main(int argc, char **argv) {
             break;
         }
         if (now - t_start_ns >= (uint64_t)cfg.duration_sec * 1000000000ULL) {
-            avg_latency_ns_in_1sec = (latency_sample_cnt_in_1sec > 0) ? (latency_sum_ns_in_1sec / latency_sample_cnt_in_1sec) : 0;
-            snprintf(msg, sizeof(msg),
-                "rx_stats_final elapsed_ns=%" PRIu64 " avg_latency=%" PRIu64
-                " max_latency=%" PRIu64 " min_latency=%" PRIu64 " recv_cnt=%" PRIu64 " ok_recv_cnt=%" PRIu64
-                " gap_cnt=%" PRIu64 " dup_cnt=%" PRIu64 " reord_cnt=%" PRIu64,
-                now - t_start_ns, avg_latency_ns_in_1sec, max_latency_ns_in_1sec, min_latency_ns_in_1sec, rx_recv_any_in_1sec, rx_recv_ok_in_1sec, gap_cnt_in_1sec, dup_cnt_in_1sec, reord_cnt_in_1sec);
-            write_log_line(fp, "INFO", msg);
             write_log_line(fp, "INFO", "duration elapsed, exiting");
             break;
         }
@@ -357,7 +422,7 @@ int main(int argc, char **argv) {
         else if ( pfd.revents & POLLIN) {
             socklen_t src_len = sizeof(src_addr);
             n = recvfrom(sock, buf_udp, sizeof(buf_udp), 0, (struct sockaddr *)&src_addr, &src_len);
-            
+
             if (n < 0) {
                 if (errno == EINTR) {
                     if (g_stop_requested) {
@@ -370,92 +435,130 @@ int main(int argc, char **argv) {
                 break;
             }
             
-            rx_recv_any++;
-            rx_recv_any_in_1sec++;
 
+            if (now_monotonic_ns(&recv_now_ns) != 0) {
+                write_log_line(fp, "ERROR", "clock_gettime failed");
+                break;
+            }
+            rx_recv_any++;
+
+            target_idx = (recv_now_ns >= next_stats_ns) ? ((win_idx + 1) % 2) : (win_idx % 2);
+            win_stats[target_idx].recv_any++;
             if (n != (ssize_t)sizeof(FrameV0)) {
                 rx_bad_size++;
                 snprintf(msg, sizeof(msg), "unexpected size: %zd (expected %zu)", n, sizeof(FrameV0));
                 write_log_line(fp, "WARN", msg);
                 continue;
             }
-            if (now_monotonic_ns(&recv_now_ns) != 0) {
-                write_log_line(fp, "ERROR", "clock_gettime failed");
-                break;
-            }
+
+
             memcpy(&frame, buf_udp, sizeof(frame));
             // seq差分ベースの欠損推定（UDPなので推定値）
             // - 前進: gapを加算
             // - 重複: dupとして計上（gapには入れない）
             // - 逆順: reorderとして計上（gapには入れない）
             //   ※逆順でprev_seqを更新すると後続の推定を崩しやすい
+            gap = 0;
             if (has_prev_seq){
                 if (prev_seq == frame.seq) {
                     dup_cnt++;
-                    dup_cnt_in_1sec++;
+                    win_stats[target_idx].dup_cnt++;
                 } else if (prev_seq < frame.seq) {// W01では seq wrap-around（uint32_t周回）は未対応
-                    gap_cnt += frame.seq - prev_seq - 1;
-                    gap_cnt_in_1sec += frame.seq - prev_seq - 1;
+                    gap = frame.seq - prev_seq - 1;
+                    gap_cnt += gap;
+                    win_stats[target_idx].gap_cnt += gap;
                     prev_seq = frame.seq;
                 } else if (frame.seq < prev_seq) {
+                    gap = 0;
                     reord_cnt++;
-                    reord_cnt_in_1sec++;
+                    win_stats[target_idx].reord_cnt++;
+
                 }
             }else {
                 has_prev_seq = true;
                 prev_seq = frame.seq;
             } 
-
+            latency = 0;
             if (recv_now_ns >= frame.timestamp_ns) {
                 latency = recv_now_ns - frame.timestamp_ns;
                 latency_sum_ns += latency;
-                latency_sum_ns_in_1sec   += latency;
+
                 latency_sample_cnt++;
-                latency_sample_cnt_in_1sec++;
-                if (latency > max_latency_ns_in_1sec) {
-                    max_latency_ns_in_1sec = latency;
+                win_stats[target_idx].latency_sum_ns += latency;
+                win_stats[target_idx].latency_sample_cnt++; 
+                if (latency > max_latency_ns) {
+                    max_latency_ns = latency;
                 }
-                if (min_latency_ns_in_1sec == 0 || latency < min_latency_ns_in_1sec) {
-                    min_latency_ns_in_1sec = latency;
+                if (min_latency_ns == 0 || latency < min_latency_ns) {
+                    min_latency_ns = latency;
+
                 }
+                if (latency > win_stats[target_idx].latency_max_ns) {
+                    win_stats[target_idx].latency_max_ns = latency; 
+                }
+                if (latency < win_stats[target_idx].latency_min_ns || win_stats[target_idx].latency_min_ns == 0) {
+                    win_stats[target_idx].latency_min_ns = latency; 
+                }
+
             } else {
                 future_ts_cnt++;
             }
             if (recv_now_ns < frame.timestamp_ns) {
                 future_ts_detected = 1;
             }
+            if (csv_by_1recv_fp) {
+                snprintf(msg_csv_by_1recv, sizeof(msg_csv_by_1recv),
+                    "%" PRIu64 ",%" PRIu32 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 "\n",
+                    recv_now_ns, frame.seq, frame.timestamp_ns, latency, gap
+                    );
+                fprintf(csv_by_1recv_fp, "%s", msg_csv_by_1recv);
+            }
             rx_recv_ok++;
-            rx_recv_ok_in_1sec++;
 
+            win_stats[target_idx].recv_ok++;
 
         }
         if (now_monotonic_ns(&now_for_stats) != 0) {
             write_log_line(fp, "ERROR", "clock_gettime failed");
             break;
         }
-        if (now_for_stats >= next_stats_ns ) {
-            avg_latency_ns_in_1sec = (latency_sample_cnt_in_1sec > 0) ? (latency_sum_ns_in_1sec / latency_sample_cnt_in_1sec) : 0;
-            snprintf(msg, sizeof(msg),
-                "rx_stats elapsed_ns=%" PRIu64 " avg_latency=%" PRIu64
-                " max_latency=%" PRIu64 " min_latency=%" PRIu64 " recv_cnt=%" PRIu64 " ok_recv_cnt=%" PRIu64
-                " gap_cnt=%" PRIu64 " dup_cnt=%" PRIu64 " reord_cnt=%" PRIu64,
-                now_for_stats - t_start_ns, avg_latency_ns_in_1sec, max_latency_ns_in_1sec, min_latency_ns_in_1sec, rx_recv_any_in_1sec, rx_recv_ok_in_1sec, gap_cnt_in_1sec, dup_cnt_in_1sec, reord_cnt_in_1sec);
+        while (now_for_stats >= next_stats_ns ) {
+            cur_idx = win_idx % 2;
+            avg_latency_ns_in_1sec = win_stats[cur_idx].latency_sample_cnt > 0 ? win_stats[cur_idx].latency_sum_ns / win_stats[cur_idx].latency_sample_cnt : 0;
+
+            if (csv_in_1sec_fp) {
+                snprintf(msg_csv_1sec, sizeof(msg_csv_1sec),
+                    "%" PRIu64 ",%.3f,%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 "\n",
+                    (uint64_t)(next_stats_ns - t_start_ns)/1000000000ULL, (double)avg_latency_ns_in_1sec/1000000.0, win_stats[cur_idx].latency_max_ns/1000000, 
+                    win_stats[cur_idx].latency_min_ns/1000000, win_stats[cur_idx].recv_any, win_stats[cur_idx].recv_ok, win_stats[cur_idx].gap_cnt, win_stats[cur_idx].dup_cnt, win_stats[cur_idx].reord_cnt);
+                fprintf(csv_in_1sec_fp, "%s", msg_csv_1sec);
+            } else {
+                snprintf(msg, sizeof(msg),
+                    "rx_stats elapsed_sec=%" PRIu64 
+                    " avg_latency=%.3f"  
+                    " max_latency=%" PRIu64 
+                    " min_latency=%" PRIu64 
+                    " recv_cnt=%" PRIu64 " ok_recv_cnt=%" PRIu64 " gap_cnt=%" PRIu64 " dup_cnt=%" PRIu64 " reord_cnt=%" PRIu64,
+                    (uint64_t)(next_stats_ns - t_start_ns)/1000000000ULL, (double)avg_latency_ns_in_1sec/1000000.0, win_stats[cur_idx].latency_max_ns/1000000, 
+                    win_stats[cur_idx].latency_min_ns/1000000, win_stats[cur_idx].recv_any, win_stats[cur_idx].recv_ok, win_stats[cur_idx].gap_cnt, win_stats[cur_idx].dup_cnt, win_stats[cur_idx].reord_cnt);
+                write_log_line(fp, "INFO", msg);
+            }
 
             next_stats_ns += 1000000000ULL;            
-
-            latency_sum_ns_in_1sec = 0;
-            latency_sample_cnt_in_1sec = 0;
-            max_latency_ns_in_1sec = 0;
-            min_latency_ns_in_1sec = 0;
-            rx_recv_any_in_1sec = 0;
-            rx_recv_ok_in_1sec = 0;
-            gap_cnt_in_1sec = 0;
-            dup_cnt_in_1sec = 0;
-            reord_cnt_in_1sec = 0;
-            write_log_line(fp, "INFO", msg);
+            win_stats[cur_idx] = (WindowStats){0};
+            win_idx++;
         }
         
     }
+    if (csv_in_1sec_fp) {
+        fflush(csv_in_1sec_fp);
+        fclose(csv_in_1sec_fp);
+    }
+    if (csv_by_1recv_fp) {
+        fflush(csv_by_1recv_fp);
+        fclose(csv_by_1recv_fp);
+    }
+
 
     uint64_t elapsed_ns = 0;
     if (now_monotonic_ns(&elapsed_ns) == 0 && elapsed_ns >= t_start_ns) {
@@ -467,10 +570,11 @@ int main(int argc, char **argv) {
     snprintf(msg, sizeof(msg),
             "rx summary recv_any=%" PRIu64 " recv_ok=%" PRIu64
             " bad_size=%" PRIu64 " poll_timeout=%" PRIu64
-            " elapsed_ms=%" PRIu64 " avg_latency_ms=%.3f gap_cnt=%" PRIu64 " dup_cnt=%" PRIu64 " reord_cnt=%" PRIu64 " future_ts_cnt=%" PRIu64 " future_ts_detected=%" PRIu64,
+            " elapsed_ms=%" PRIu64 " avg_latency_ms=%.3f" " max_latency_ms=%" PRIu64 " min_latency_ms=%" PRIu64 " gap_cnt=%" PRIu64 " dup_cnt=%" PRIu64 " reord_cnt=%" PRIu64 " future_ts_cnt=%" PRIu64 " future_ts_detected=%" PRIu64,
             rx_recv_any, rx_recv_ok,
              rx_bad_size, rx_poll_timeout,
             elapsed_ns / 1000000, (latency_sample_cnt > 0 ? (double)latency_sum_ns / latency_sample_cnt / 1000000.0 : 0.0),
+            max_latency_ns / 1000000, min_latency_ns / 1000000,
             gap_cnt, dup_cnt, reord_cnt, future_ts_cnt, future_ts_detected);
     write_log_line(fp, "INFO", msg);
 

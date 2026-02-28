@@ -20,12 +20,14 @@ RUN_DIR="logs/run_${TS}_60s"
 mkdir -p "$RUN_DIR"
 
 RX_LOG="$RUN_DIR/rx.log"
+RX_CSV_IN_1SEC_LOG="$RUN_DIR/rx_in_1sec.csv"
+RX_CSV_BY_1RECV_LOG="$RUN_DIR/rx_by_1recv.csv"
 TX_LOG="$RUN_DIR/tx.log"
 
 echo "[INFO] run dir: $RUN_DIR"
 
 # 受信側を先に起動（本実装時の取りこぼし防止）
-./bin/rx --bind-ip 127.0.0.1 --port 9000 --duration-sec 60 --log-path "$RX_LOG" &
+./bin/rx --bind-ip 127.0.0.1 --port 9000 --duration-sec 60 --log-path "$RX_LOG"  --csv-in-1sec-log-path "$RX_CSV_IN_1SEC_LOG" --csv-by-1recv-log-path "$RX_CSV_BY_1RECV_LOG" &
 RX_PID=$!
 
 # 起動安定化のための待機
