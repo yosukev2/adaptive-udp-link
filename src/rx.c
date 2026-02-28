@@ -368,6 +368,8 @@ int main(int argc, char **argv) {
     int target_idx = 0;
     int cur_idx = 0;
 
+    uint64_t elapsed_sec = 0;
+
 
     if (now_monotonic_ns(&t_start_ns) != 0) {
         write_log_line(fp, "ERROR", "clock_gettime failed");
@@ -525,22 +527,22 @@ int main(int argc, char **argv) {
         while (now_for_stats >= next_stats_ns ) {
             cur_idx = win_idx % 2;
             avg_latency_ns_in_1sec = win_stats[cur_idx].latency_sample_cnt > 0 ? win_stats[cur_idx].latency_sum_ns / win_stats[cur_idx].latency_sample_cnt : 0;
-
+            elapsed_sec = (next_stats_ns - t_start_ns) / UINT64_C(1000000000);
             if (csv_in_1sec_fp) {
                 snprintf(msg_csv_1sec, sizeof(msg_csv_1sec),
-                    "%" PRIu64 ",%.3f,%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 "\n",
-                    (uint64_t)(next_stats_ns - t_start_ns)/1000000000ULL, (double)avg_latency_ns_in_1sec/1000000.0, win_stats[cur_idx].latency_max_ns/1000000, 
-                    win_stats[cur_idx].latency_min_ns/1000000, win_stats[cur_idx].recv_any, win_stats[cur_idx].recv_ok, win_stats[cur_idx].gap_cnt, win_stats[cur_idx].dup_cnt, win_stats[cur_idx].reord_cnt);
+                    "%" PRIu64 ",%.3f,%.3f,%.3f,%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 "\n",
+                    elapsed_sec, (double)avg_latency_ns_in_1sec/1000000.0, (double)win_stats[cur_idx].latency_max_ns/1000000.0, 
+                    (double)win_stats[cur_idx].latency_min_ns/1000000.0, win_stats[cur_idx].recv_any, win_stats[cur_idx].recv_ok, win_stats[cur_idx].gap_cnt, win_stats[cur_idx].dup_cnt, win_stats[cur_idx].reord_cnt);
                 fprintf(csv_in_1sec_fp, "%s", msg_csv_1sec);
             } else {
                 snprintf(msg, sizeof(msg),
                     "rx_stats elapsed_sec=%" PRIu64 
                     " avg_latency=%.3f"  
-                    " max_latency=%" PRIu64 
-                    " min_latency=%" PRIu64 
+                    " max_latency=%.3f" 
+                    " min_latency=%.3f" 
                     " recv_cnt=%" PRIu64 " ok_recv_cnt=%" PRIu64 " gap_cnt=%" PRIu64 " dup_cnt=%" PRIu64 " reord_cnt=%" PRIu64,
-                    (uint64_t)(next_stats_ns - t_start_ns)/1000000000ULL, (double)avg_latency_ns_in_1sec/1000000.0, win_stats[cur_idx].latency_max_ns/1000000, 
-                    win_stats[cur_idx].latency_min_ns/1000000, win_stats[cur_idx].recv_any, win_stats[cur_idx].recv_ok, win_stats[cur_idx].gap_cnt, win_stats[cur_idx].dup_cnt, win_stats[cur_idx].reord_cnt);
+                    elapsed_sec, (double)avg_latency_ns_in_1sec/1000000.0, (double)win_stats[cur_idx].latency_max_ns/1000000.0, 
+                    (double)win_stats[cur_idx].latency_min_ns/1000000.0, win_stats[cur_idx].recv_any, win_stats[cur_idx].recv_ok, win_stats[cur_idx].gap_cnt, win_stats[cur_idx].dup_cnt, win_stats[cur_idx].reord_cnt);
                 write_log_line(fp, "INFO", msg);
             }
 
