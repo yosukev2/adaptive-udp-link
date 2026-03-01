@@ -77,6 +77,34 @@ typedef struct {
 } RxConfig;
 
 typedef struct {
+    FILE *log_fp;
+    FILE *csv_in_1sec_fp;
+    FILE *csv_by_1recv_fp;
+} RxFiles;
+
+typedef struct {
+    uint64_t recv_any;
+    uint64_t recv_ok;
+    uint64_t bad_size;
+    uint64_t poll_timeout;
+    uint64_t gap_cnt;
+    uint64_t dup_cnt;
+    uint64_t reord_cnt;
+    uint64_t latency_sum_ns;
+    uint64_t latency_sample_cnt;
+    uint64_t future_ts_cnt;
+    uint64_t future_ts_detected;
+    uint64_t min_latency_ns;
+    uint64_t max_latency_ns;
+} RxTotals;
+
+typedef struct {
+    uint32_t prev_seq;
+    bool has_prev_seq;
+} SeqState;
+
+
+typedef struct {
     uint64_t recv_any;
     uint64_t recv_ok;
     uint64_t gap_cnt;
@@ -84,9 +112,28 @@ typedef struct {
     uint64_t reord_cnt;
     uint64_t latency_sum_ns;
     uint64_t latency_sample_cnt;
-    uint64_t latency_max_ns;
-    uint64_t latency_min_ns;
+    uint64_t max_latency_ns;
+    uint64_t min_latency_ns;
 } WindowStats;
+
+typedef struct {
+    uint64_t t_start_ns;
+    uint64_t next_stats_ns;
+    uint64_t now_ns;
+    uint64_t recv_now_ns;
+    uint64_t now_for_stats_ns;
+    uint64_t elapsed_sec;
+    uint64_t avg_latency_ns_in_1sec;
+    uint64_t gap;
+    uint64_t latency;
+    int wait_ms;
+    int win_idx;
+    int target_idx;
+    int cur_idx;
+    WindowStats win_stats[2];
+} RxTimingState;
+
+
 
 
 static void print_usage(const char *prog) {
@@ -105,7 +152,121 @@ static int parse_int(const char *s, int *out) {
     return 0;
 }
 
+static int parse_args(int argc, char **argv, RxConfig *cfg) {
+    int opt;
+    int option_index = 0;
+
+    static struct option long_opts[] = {
+        {"bind-ip", required_argument, 0, 1},
+        {"port", required_argument, 0, 2},
+        {"duration-sec", required_argument, 0, 3},
+        {"log-path", required_argument, 0, 4},
+        {"csv-in-1sec-log-path", required_argument, 0, 5},
+        {"csv-by-1recv-log-path", required_argument, 0, 6},
+        {0, 0, 0, 0}
+    };
+
+    while ((opt = getopt_long(argc, argv, "", long_opts, &option_index)) != -1) {
+        switch (opt) {
+            case 1:
+                cfg->bind_ip = optarg;
+                break;
+
+            case 2:
+                if (parse_int(optarg, &cfg->port) != 0) {
+                    fprintf(stderr, "Invalid --port: %s\n", optarg);
+                    print_usage(argv[0]);
+                    return -1;
+                }
+                break;
+
+            case 3:
+                if (parse_int(optarg, &cfg->duration_sec) != 0) {
+                    fprintf(stderr, "Invalid --duration-sec: %s\n", optarg);
+                    print_usage(argv[0]);
+                    return -1;
+                }
+                break;
+
+            case 4:
+                cfg->log_path = optarg;
+                break;
+
+            case 5:
+                cfg->csv_in_1sec_log_path = optarg;
+                break;
+
+            case 6:
+                cfg->csv_by_1recv_log_path = optarg;
+                break;
+
+            default:
+                print_usage(argv[0]);
+                return -1;
+        }
+    }
+
+    if (!cfg->log_path || cfg->port <= 0 || cfg->port > 65535 || cfg->duration_sec <= 0) {
+        print_usage(argv[0]);
+        return -1;
+    }
+
+    return 0;
+}
+
+static void close_output_files(RxFiles *files) {
+    if (files->log_fp) {
+        fclose(files->log_fp);
+        files->log_fp = NULL;
+    }
+    if (files->csv_in_1sec_fp) {
+        fclose(files->csv_in_1sec_fp);
+        files->csv_in_1sec_fp = NULL;
+    }
+    if (files->csv_by_1recv_fp) {
+        fclose(files->csv_by_1recv_fp);
+        files->csv_by_1recv_fp = NULL;
+    }
+}
+
+static int open_output_files(const RxConfig *config, RxFiles *files) {
+    files->log_fp = fopen(config->log_path, "a");
+    if (!files->log_fp) {
+        perror("fopen(log_path)");
+        return -1;
+    }
+
+    if (config->csv_in_1sec_log_path) {
+        files->csv_in_1sec_fp = fopen(config->csv_in_1sec_log_path, "w");
+        if (!files->csv_in_1sec_fp) {
+            perror("fopen(csv_in_1sec_log_path)");
+            close_output_files(files);
+            return -1;
+        }
+        fprintf(files->csv_in_1sec_fp, "elapsed_sec,avg_latency_ms,max_latency_ms,min_latency_ms,recv_cnt,ok_recv_cnt,gap_cnt,dup_cnt,reord_cnt\n");
+        fflush(files->csv_in_1sec_fp);
+    }
+
+    if (config->csv_by_1recv_log_path) {
+        files->csv_by_1recv_fp = fopen(config->csv_by_1recv_log_path, "w");
+        if (!files->csv_by_1recv_fp) {
+            perror("fopen(csv_by_1recv_log_path)");
+            close_output_files(files);
+            return -1;
+        }
+        fprintf(files->csv_by_1recv_fp, "rcv_time_ns,seq,send_time_ns,latency_ns,missing_delta\n");
+        fflush(files->csv_by_1recv_fp);
+    }
+
+    return 0;
+}
+
+
+
 static void write_log_line(FILE *fp, const char *level, const char *msg) {
+    if (!fp || !level || !msg) {
+        return;
+    }
     time_t now = time(NULL);
     struct tm tmv;
     localtime_r(&now, &tmv);
@@ -115,6 +276,44 @@ static void write_log_line(FILE *fp, const char *level, const char *msg) {
     fprintf(fp, "%s [%s] %s\n", ts, level, msg);
     fflush(fp);
 }
+
+static void write_summary(const RxFiles *files, const RxTotals *totals, uint64_t elapsed_ns) {
+    char msg[512];
+
+    if (!files || !files->log_fp || !totals) {
+        return;
+    }
+
+    snprintf(
+        msg,
+        sizeof(msg),
+        "rx summary recv_any=%" PRIu64 " recv_ok=%" PRIu64
+        " bad_size=%" PRIu64 " poll_timeout=%" PRIu64
+        " elapsed_ms=%" PRIu64 " avg_latency_ms=%.3f"
+        " max_latency_ms=%" PRIu64 " min_latency_ms=%" PRIu64
+        " gap_cnt=%" PRIu64 " dup_cnt=%" PRIu64 " reord_cnt=%" PRIu64
+        " future_ts_cnt=%" PRIu64 " future_ts_detected=%" PRIu64,
+        totals->recv_any,
+        totals->recv_ok,
+        totals->bad_size,
+        totals->poll_timeout,
+        elapsed_ns / 1000000ULL,
+        (totals->latency_sample_cnt > 0)
+            ? (double)totals->latency_sum_ns / (double)totals->latency_sample_cnt / 1000000.0
+            : 0.0,
+        totals->max_latency_ns / 1000000ULL,
+        totals->min_latency_ns / 1000000ULL,
+        totals->gap_cnt,
+        totals->dup_cnt,
+        totals->reord_cnt,
+        totals->future_ts_cnt,
+        totals->future_ts_detected
+    );
+
+    write_log_line(files->log_fp, "INFO", msg);
+}
+
+
 
 
 static int now_monotonic_ns(uint64_t *out_ns) {
@@ -143,148 +342,153 @@ static int build_bind_addr(const char *ip, int port, struct sockaddr_in *out) {
     return 0;
 }
 
+static void update_seq_stats(
+    const FrameV0 *frame,
+    SeqState *seq,
+    RxTotals *totals,
+    RxTimingState *ts,
+    WindowStats *win
+) {
+    ts->gap = 0;
 
+    if (seq->has_prev_seq) {
+        if (seq->prev_seq == frame->seq) {
+            totals->dup_cnt++;
+            win->dup_cnt++;
+        } else if (seq->prev_seq < frame->seq) {
+            ts->gap = frame->seq - seq->prev_seq - 1;
+            totals->gap_cnt += ts->gap;
+            win->gap_cnt += ts->gap;
+            seq->prev_seq = frame->seq;
+        } else if (frame->seq < seq->prev_seq) {
+            totals->reord_cnt++;
+            win->reord_cnt++;
+        }
+    } else {
+        seq->has_prev_seq = true;
+        seq->prev_seq = frame->seq;
+    }
+}
+
+static void update_latency_stats(
+    const FrameV0 *frame,
+    RxTotals *totals,
+    RxTimingState *ts,
+    WindowStats *win
+) {
+    ts->latency = 0;
+    if (ts->recv_now_ns >= frame->timestamp_ns) {
+        ts->latency = ts->recv_now_ns - frame->timestamp_ns;
+        totals->latency_sum_ns += ts->latency;
+
+        totals->latency_sample_cnt++;
+        win->latency_sample_cnt++;
+        win->latency_sum_ns += ts->latency;
+        if (ts->latency > totals->max_latency_ns) {
+            totals->max_latency_ns = ts->latency;
+        }
+        if (totals->min_latency_ns == 0 || ts->latency < totals->min_latency_ns) {
+            totals->min_latency_ns = ts->latency;
+
+        }
+        if (ts->latency > win->max_latency_ns) {
+            win->max_latency_ns = ts->latency; 
+        }
+        if (ts->latency < win->min_latency_ns || win->min_latency_ns == 0) {
+            win->min_latency_ns = ts->latency; 
+        }
+    } else {
+        totals->future_ts_cnt++;
+    }
+    if (ts->recv_now_ns < frame->timestamp_ns) {
+        totals->future_ts_detected = 1;
+    }
+}
+
+static void write_per_recv_csv(const RxFiles *files, const RxTimingState *ts, const FrameV0 *frame) {
+    char msg_csv_by_1recv[256];
+    if (files->csv_by_1recv_fp) {
+        snprintf(msg_csv_by_1recv, sizeof(msg_csv_by_1recv),
+            "%" PRIu64 ",%" PRIu32 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 "\n",
+            ts->recv_now_ns, frame->seq, frame->timestamp_ns, ts->latency, ts->gap
+            );
+        fprintf(files->csv_by_1recv_fp, "%s", msg_csv_by_1recv);
+    }
+}
+
+static void write_log_per_1sec(const RxFiles *files, RxTimingState *ts, WindowStats *win) {
+    char msg[256];
+
+    ts->avg_latency_ns_in_1sec = win->latency_sample_cnt > 0 ? win->latency_sum_ns / win->latency_sample_cnt : 0;
+    ts->elapsed_sec = (ts->next_stats_ns - ts->t_start_ns) / UINT64_C(1000000000);
+    if (files->csv_in_1sec_fp) {
+        snprintf(msg, sizeof(msg),
+            "%" PRIu64 ",%.3f,%.3f,%.3f,%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 "\n",
+            ts->elapsed_sec, (double)ts->avg_latency_ns_in_1sec/1000000.0, (double)win->max_latency_ns/1000000.0, 
+            (double)win->min_latency_ns/1000000.0, win->recv_any, win->recv_ok, win->gap_cnt, win->dup_cnt, win->reord_cnt);
+        fprintf(files->csv_in_1sec_fp, "%s", msg);
+    } else {
+        snprintf(msg, sizeof(msg),
+            "rx_stats elapsed_sec=%" PRIu64 
+            " avg_latency=%.3f"  
+            " max_latency=%.3f" 
+            " min_latency=%.3f" 
+            " recv_cnt=%" PRIu64 " ok_recv_cnt=%" PRIu64 " gap_cnt=%" PRIu64 " dup_cnt=%" PRIu64 " reord_cnt=%" PRIu64,
+            ts->elapsed_sec, (double)ts->avg_latency_ns_in_1sec/1000000.0, (double)win->max_latency_ns/1000000.0, 
+            (double)win->min_latency_ns/1000000.0, win->recv_any, win->recv_ok, win->gap_cnt, win->dup_cnt, win->reord_cnt);
+        write_log_line(files->log_fp, "INFO", msg);
+    }
+
+}
 
 int main(int argc, char **argv) {
 
     RxConfig cfg = {0};
+    RxFiles files = {0};
+    RxTotals totals = {0};
+    RxTimingState ts = {0};
+    SeqState seq_state = {0};
 
     // rx は bind-ip を省略可能にしておく（利便性のため）
     // 将来、ローカル検証時は 127.0.0.1、複数NIC環境では 0.0.0.0 と使い分けられる
     cfg.bind_ip = "0.0.0.0";
 
-    int opt;
-    int option_index = 0;
-
-    static struct option long_opts[] = {
-        {"bind-ip", required_argument, 0, 1},
-        {"port", required_argument, 0, 2},
-        {"duration-sec", required_argument, 0, 3},
-        {"log-path", required_argument, 0, 4},
-        {"csv-in-1sec-log-path", required_argument, 0, 5},
-        {"csv-by-1recv-log-path", required_argument, 0, 6},
-        {0, 0, 0, 0}
-    };
-
-    while ((opt = getopt_long(argc, argv, "", long_opts, &option_index)) != -1) {
-        switch (opt) {
-            case 1:
-                cfg.bind_ip = optarg;
-                break;
-
-            case 2:
-                if (parse_int(optarg, &cfg.port) != 0) {
-                    fprintf(stderr, "Invalid --port: %s\n", optarg);
-                    print_usage(argv[0]);
-                    return 1;
-                }
-                break;
-
-            case 3:
-                if (parse_int(optarg, &cfg.duration_sec) != 0) {
-                    fprintf(stderr, "Invalid --duration-sec: %s\n", optarg);
-                    print_usage(argv[0]);
-                    return 1;
-                }
-                break;
-
-            case 4:
-                cfg.log_path = optarg;
-                break;
-
-            case 5:
-                cfg.csv_in_1sec_log_path = optarg;
-                break;
-
-            case 6:
-                cfg.csv_by_1recv_log_path = optarg;
-                break;
-
-            default:
-                print_usage(argv[0]);
-                return 1;
-        }
-    }
-
-    // 妥当性検証
-    if (!cfg.log_path || cfg.port <= 0 || cfg.port > 65535 || cfg.duration_sec <= 0) {
-        print_usage(argv[0]);
+    if (parse_args(argc, argv, &cfg) != 0) {
         return 1;
     }
 
-    FILE *fp = fopen(cfg.log_path, "a");
-    if (!fp) {
-        perror("fopen(log_path)");
+    if (open_output_files(&cfg, &files) != 0) {
         return 1;
     }
-
-    FILE *csv_in_1sec_fp = NULL;
-    if (cfg.csv_in_1sec_log_path) {
-        csv_in_1sec_fp = fopen(cfg.csv_in_1sec_log_path, "w");
-        if (!csv_in_1sec_fp) {
-            perror("fopen(csv_in_1sec_log_path)");
-            fclose(fp);
-            return 1;
-        }
-        fprintf(csv_in_1sec_fp, "elapsed_sec,avg_latency_ms,max_latency_ms,min_latency_ms,recv_cnt,ok_recv_cnt,gap_cnt,dup_cnt,reord_cnt\n");
-        fflush(csv_in_1sec_fp);
-    }
-
-    FILE *csv_by_1recv_fp = NULL;
-    if (cfg.csv_by_1recv_log_path) {
-        csv_by_1recv_fp = fopen(cfg.csv_by_1recv_log_path, "w");
-        if (!csv_by_1recv_fp) {
-            perror("fopen(csv_by_1recv_log_path)");
-            fclose(fp);
-            if (csv_in_1sec_fp) fclose(csv_in_1sec_fp);
-            return 1;
-        }
-        fprintf(csv_by_1recv_fp, "rcv_time_ns,seq,send_time_ns,latency_ns,missing_delta\n");
-        fflush(csv_by_1recv_fp);
-    }
-
 
     if (install_signal_handlers() != 0) {
         perror("sigaction");
-        fclose(fp);
-        if (csv_in_1sec_fp) fclose(csv_in_1sec_fp);
-        if (csv_by_1recv_fp) fclose(csv_by_1recv_fp);
+        close_output_files(&files);
         return 1;
     }
 
     char buf[256];
 
     // Frame v0 の共有定義が見えていることを、起動時ログで確認できるようにする
-    snprintf(buf, sizeof(buf),
-             "frame_v0 sizeof=%zu payload_bytes=%d offsets(seq=%zu ts=%zu payload=%zu)",
-             sizeof(FrameV0),
-             FRAME_V0_PAYLOAD_BYTES,
-             offsetof(FrameV0, seq),
-             offsetof(FrameV0, timestamp_ns),
-             offsetof(FrameV0, payload));
-    write_log_line(fp, "INFO", buf);
-    
-    snprintf(buf, sizeof(buf),
-             "rx start bind=%s:%d duration_sec=%d",
-             cfg.bind_ip, cfg.port, cfg.duration_sec);
-    write_log_line(fp, "INFO", buf);
-
-    printf("rx started: bind=%s:%d duration=%d log=%s\n",
-           cfg.bind_ip, cfg.port, cfg.duration_sec, cfg.log_path);
-
-    if (csv_in_1sec_fp) {
-        printf("csv_in_1sec_log_path=%s\n", cfg.csv_in_1sec_log_path);
+    if (files.log_fp) {
+        snprintf(buf, sizeof(buf),
+                 "frame_v0 sizeof=%zu payload_bytes=%d offsets(seq=%zu ts=%zu payload=%zu)",
+                 sizeof(FrameV0),FRAME_V0_PAYLOAD_BYTES,offsetof(FrameV0, seq),offsetof(FrameV0, timestamp_ns),offsetof(FrameV0, payload));
+        write_log_line(files.log_fp, "INFO", buf);
+        snprintf(buf, sizeof(buf),
+                "rx start bind=%s:%d duration_sec=%d",
+                cfg.bind_ip, cfg.port, cfg.duration_sec);
+        write_log_line(files.log_fp, "INFO", buf);
     }
-    if (csv_by_1recv_fp) {
-        printf("csv_by_1recv_log_path=%s\n", cfg.csv_by_1recv_log_path);
-    }
+
+    printf("rx started: bind=%s:%d duration=%d log=%s\n", cfg.bind_ip, cfg.port, cfg.duration_sec, cfg.log_path);
+    if (files.csv_in_1sec_fp) printf("csv_in_1sec_log_path=%s\n", cfg.csv_in_1sec_log_path);
+    if (files.csv_by_1recv_fp) printf("csv_by_1recv_log_path=%s\n", cfg.csv_by_1recv_log_path);
     
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0) {
         perror("socket");
-        fclose(fp);
-        if (csv_in_1sec_fp) fclose(csv_in_1sec_fp);
-        if (csv_by_1recv_fp) fclose(csv_by_1recv_fp);
+        close_output_files(&files);
         return 1;  // または exit(EXIT_FAILURE);
     }
 
@@ -296,118 +500,62 @@ int main(int argc, char **argv) {
     struct sockaddr_in bind_addr={0};
     if (build_bind_addr(cfg.bind_ip, cfg.port, &bind_addr) != 0) {
         close(sock);
-        fclose(fp);
-        if (csv_in_1sec_fp) fclose(csv_in_1sec_fp);
-        if (csv_by_1recv_fp) fclose(csv_by_1recv_fp);
+        close_output_files(&files);
         return 1;
     }
 
     if (bind(sock, (struct sockaddr *)&bind_addr, sizeof(bind_addr)) != 0) {
         perror("bind");
         close(sock);
-        fclose(fp);
-        if (csv_in_1sec_fp) fclose(csv_in_1sec_fp);
-        if (csv_by_1recv_fp) fclose(csv_by_1recv_fp);
+        close_output_files(&files);
         return 1;
     }
 
-
-
-    uint64_t now = 0;
-
-    uint64_t t_start_ns = 0;
 
     // 起動ログを書き込む
     FrameV0 frame;
     uint8_t buf_udp[sizeof(FrameV0)];
 
     char msg[256];
-    char msg_csv_1sec[256];
-    char msg_csv_by_1recv[256];
-
     ssize_t n = 0;
     struct sockaddr_in src_addr;
-    uint64_t rx_recv_any = 0;
-    uint64_t rx_recv_ok = 0;
-    
 
 
-    uint64_t rx_bad_size = 0;
-    uint64_t rx_poll_timeout = 0;
-
-    uint32_t prev_seq = 0; 
-    bool has_prev_seq = false; 
-
-    uint64_t gap_cnt = 0;
-    uint64_t dup_cnt = 0;
-    uint64_t reord_cnt = 0;
-
-    uint64_t gap = 0;
-
-
-    uint64_t latency_sum_ns = 0;
-    uint64_t latency_sample_cnt = 0;
-    uint64_t future_ts_cnt = 0;
-    uint64_t future_ts_detected = 0;
-
-    uint64_t recv_now_ns = 0;
-    int wait_ms = 0;
-
-    uint64_t latency = 0;
-    uint64_t min_latency_ns = 0;
-    uint64_t max_latency_ns = 0;
-
-
-    uint64_t next_stats_ns = 0; // 1秒ごとに統計ログ出力
-    uint64_t now_for_stats = 0; // 1秒ごとに統計ログ出力
-
-    uint64_t avg_latency_ns_in_1sec = 0;
-
-    WindowStats win_stats[2] = {0};
-    int win_idx = 0;
-    int target_idx = 0;
-    int cur_idx = 0;
-
-    uint64_t elapsed_sec = 0;
-
-
-    if (now_monotonic_ns(&t_start_ns) != 0) {
-        write_log_line(fp, "ERROR", "clock_gettime failed");
+    if (now_monotonic_ns(&ts.t_start_ns) != 0) {
+        write_log_line(files.log_fp, "ERROR", "clock_gettime failed");
         close(sock);
-        fclose(fp);
-        if (csv_in_1sec_fp) fclose(csv_in_1sec_fp);
-        if (csv_by_1recv_fp) fclose(csv_by_1recv_fp);
+        close_output_files(&files);
         return 1;
     }
     
-    next_stats_ns = t_start_ns + 1000000000ULL;
+    ts.next_stats_ns = ts.t_start_ns + 1000000000ULL;
 
     while (1) {
         if (g_stop_requested) {
-            write_log_line(fp, "INFO", "stop requested by signal");
+            write_log_line(files.log_fp, "INFO", "stop requested by signal");
             break;
         }
 
-        if (now_monotonic_ns(&now) != 0) {
-            write_log_line(fp, "ERROR", "clock_gettime failed");
+        if (now_monotonic_ns(&ts.now_ns) != 0) {
+            write_log_line(files.log_fp, "ERROR", "clock_gettime failed");
             break;
         }
-        if (now - t_start_ns >= (uint64_t)cfg.duration_sec * 1000000000ULL) {
-            write_log_line(fp, "INFO", "duration elapsed, exiting");
+        if (ts.now_ns - ts.t_start_ns >= (uint64_t)cfg.duration_sec * 1000000000ULL) {
+            write_log_line(files.log_fp, "INFO", "duration elapsed, exiting");
             break;
         }
 
-        if (next_stats_ns > now) {
-            wait_ms = (int)((next_stats_ns - now + 999999ULL) / 1000000ULL);
+        if (ts.next_stats_ns > ts.now_ns) {
+            ts.wait_ms = (int)((ts.next_stats_ns - ts.now_ns + 999999ULL) / 1000000ULL);
         } else {
-            wait_ms = 0;
+            ts.wait_ms = 0;
         }
-        int ret = poll(&pfd, 1, wait_ms);
+        int ret = poll(&pfd, 1, ts.wait_ms);
 
         if (ret < 0) {
             if (errno == EINTR) {
                 if (g_stop_requested) {
-                    write_log_line(fp, "INFO", "poll interrupted by signal");
+                    write_log_line(files.log_fp, "INFO", "poll interrupted by signal");
                     break;
                 }
                 continue;
@@ -415,7 +563,7 @@ int main(int argc, char **argv) {
             perror("poll");
             break;
         }else if (ret == 0) {
-            rx_poll_timeout++;
+            totals.poll_timeout++;
         } 
         else if (pfd.revents & (POLLERR | POLLNVAL)) {
             fprintf(stderr, "poll error revents=0x%x\n", pfd.revents);
@@ -428,7 +576,7 @@ int main(int argc, char **argv) {
             if (n < 0) {
                 if (errno == EINTR) {
                     if (g_stop_requested) {
-                        write_log_line(fp, "INFO", "recvfrom interrupted by signal");
+                        write_log_line(files.log_fp, "INFO", "recvfrom interrupted by signal");
                         break;
                     }
                     continue;
@@ -438,150 +586,59 @@ int main(int argc, char **argv) {
             }
             
 
-            if (now_monotonic_ns(&recv_now_ns) != 0) {
-                write_log_line(fp, "ERROR", "clock_gettime failed");
+            if (now_monotonic_ns(&ts.recv_now_ns) != 0) {
+                write_log_line(files.log_fp, "ERROR", "clock_gettime failed");
                 break;
             }
-            rx_recv_any++;
+            totals.recv_any++;
 
-            target_idx = (recv_now_ns >= next_stats_ns) ? ((win_idx + 1) % 2) : (win_idx % 2);
-            win_stats[target_idx].recv_any++;
+            ts.target_idx = (ts.recv_now_ns >= ts.next_stats_ns) ? ((ts.win_idx + 1) % 2) : (ts.win_idx % 2);
+            ts.win_stats[ts.target_idx].recv_any++;
             if (n != (ssize_t)sizeof(FrameV0)) {
-                rx_bad_size++;
+                totals.bad_size++;
                 snprintf(msg, sizeof(msg), "unexpected size: %zd (expected %zu)", n, sizeof(FrameV0));
-                write_log_line(fp, "WARN", msg);
+                write_log_line(files.log_fp, "WARN", msg);
                 continue;
             }
 
-
             memcpy(&frame, buf_udp, sizeof(frame));
-            // seq差分ベースの欠損推定（UDPなので推定値）
-            // - 前進: gapを加算
-            // - 重複: dupとして計上（gapには入れない）
-            // - 逆順: reorderとして計上（gapには入れない）
-            //   ※逆順でprev_seqを更新すると後続の推定を崩しやすい
-            gap = 0;
-            if (has_prev_seq){
-                if (prev_seq == frame.seq) {
-                    dup_cnt++;
-                    win_stats[target_idx].dup_cnt++;
-                } else if (prev_seq < frame.seq) {// W01では seq wrap-around（uint32_t周回）は未対応
-                    gap = frame.seq - prev_seq - 1;
-                    gap_cnt += gap;
-                    win_stats[target_idx].gap_cnt += gap;
-                    prev_seq = frame.seq;
-                } else if (frame.seq < prev_seq) {
-                    gap = 0;
-                    reord_cnt++;
-                    win_stats[target_idx].reord_cnt++;
+            update_seq_stats(&frame, &seq_state, &totals, &ts, &ts.win_stats[ts.target_idx]);
+            update_latency_stats(&frame, &totals, &ts, &ts.win_stats[ts.target_idx]);
+            write_per_recv_csv(&files, &ts, &frame);
 
-                }
-            }else {
-                has_prev_seq = true;
-                prev_seq = frame.seq;
-            } 
-            latency = 0;
-            if (recv_now_ns >= frame.timestamp_ns) {
-                latency = recv_now_ns - frame.timestamp_ns;
-                latency_sum_ns += latency;
+            totals.recv_ok++;
 
-                latency_sample_cnt++;
-                win_stats[target_idx].latency_sum_ns += latency;
-                win_stats[target_idx].latency_sample_cnt++; 
-                if (latency > max_latency_ns) {
-                    max_latency_ns = latency;
-                }
-                if (min_latency_ns == 0 || latency < min_latency_ns) {
-                    min_latency_ns = latency;
-
-                }
-                if (latency > win_stats[target_idx].latency_max_ns) {
-                    win_stats[target_idx].latency_max_ns = latency; 
-                }
-                if (latency < win_stats[target_idx].latency_min_ns || win_stats[target_idx].latency_min_ns == 0) {
-                    win_stats[target_idx].latency_min_ns = latency; 
-                }
-
-            } else {
-                future_ts_cnt++;
-            }
-            if (recv_now_ns < frame.timestamp_ns) {
-                future_ts_detected = 1;
-            }
-            if (csv_by_1recv_fp) {
-                snprintf(msg_csv_by_1recv, sizeof(msg_csv_by_1recv),
-                    "%" PRIu64 ",%" PRIu32 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 "\n",
-                    recv_now_ns, frame.seq, frame.timestamp_ns, latency, gap
-                    );
-                fprintf(csv_by_1recv_fp, "%s", msg_csv_by_1recv);
-            }
-            rx_recv_ok++;
-
-            win_stats[target_idx].recv_ok++;
+            ts.win_stats[ts.target_idx].recv_ok++;
 
         }
-        if (now_monotonic_ns(&now_for_stats) != 0) {
-            write_log_line(fp, "ERROR", "clock_gettime failed");
+        if (now_monotonic_ns(&ts.now_for_stats_ns) != 0) {
+            write_log_line(files.log_fp, "ERROR", "clock_gettime failed");
             break;
         }
-        while (now_for_stats >= next_stats_ns ) {
-            cur_idx = win_idx % 2;
-            avg_latency_ns_in_1sec = win_stats[cur_idx].latency_sample_cnt > 0 ? win_stats[cur_idx].latency_sum_ns / win_stats[cur_idx].latency_sample_cnt : 0;
-            elapsed_sec = (next_stats_ns - t_start_ns) / UINT64_C(1000000000);
-            if (csv_in_1sec_fp) {
-                snprintf(msg_csv_1sec, sizeof(msg_csv_1sec),
-                    "%" PRIu64 ",%.3f,%.3f,%.3f,%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 "\n",
-                    elapsed_sec, (double)avg_latency_ns_in_1sec/1000000.0, (double)win_stats[cur_idx].latency_max_ns/1000000.0, 
-                    (double)win_stats[cur_idx].latency_min_ns/1000000.0, win_stats[cur_idx].recv_any, win_stats[cur_idx].recv_ok, win_stats[cur_idx].gap_cnt, win_stats[cur_idx].dup_cnt, win_stats[cur_idx].reord_cnt);
-                fprintf(csv_in_1sec_fp, "%s", msg_csv_1sec);
-            } else {
-                snprintf(msg, sizeof(msg),
-                    "rx_stats elapsed_sec=%" PRIu64 
-                    " avg_latency=%.3f"  
-                    " max_latency=%.3f" 
-                    " min_latency=%.3f" 
-                    " recv_cnt=%" PRIu64 " ok_recv_cnt=%" PRIu64 " gap_cnt=%" PRIu64 " dup_cnt=%" PRIu64 " reord_cnt=%" PRIu64,
-                    elapsed_sec, (double)avg_latency_ns_in_1sec/1000000.0, (double)win_stats[cur_idx].latency_max_ns/1000000.0, 
-                    (double)win_stats[cur_idx].latency_min_ns/1000000.0, win_stats[cur_idx].recv_any, win_stats[cur_idx].recv_ok, win_stats[cur_idx].gap_cnt, win_stats[cur_idx].dup_cnt, win_stats[cur_idx].reord_cnt);
-                write_log_line(fp, "INFO", msg);
-            }
+        while (ts.now_for_stats_ns >= ts.next_stats_ns ) {
+            ts.cur_idx = ts.win_idx % 2;
+            write_log_per_1sec(&files, &ts);
 
-            next_stats_ns += 1000000000ULL;            
-            win_stats[cur_idx] = (WindowStats){0};
-            win_idx++;
+            ts.next_stats_ns += 1000000000ULL;            
+            ts.win_stats[ts.cur_idx] = (WindowStats){0};
+            ts.win_idx++;
         }
         
     }
-    if (csv_in_1sec_fp) {
-        fflush(csv_in_1sec_fp);
-        fclose(csv_in_1sec_fp);
-    }
-    if (csv_by_1recv_fp) {
-        fflush(csv_by_1recv_fp);
-        fclose(csv_by_1recv_fp);
-    }
-
 
     uint64_t elapsed_ns = 0;
-    if (now_monotonic_ns(&elapsed_ns) == 0 && elapsed_ns >= t_start_ns) {
-        elapsed_ns -= t_start_ns;
+    if (now_monotonic_ns(&elapsed_ns) == 0 && elapsed_ns >= ts.t_start_ns) {
+        elapsed_ns -= ts.t_start_ns;
     } else {
         elapsed_ns = 0;
     }
 
-    snprintf(msg, sizeof(msg),
-            "rx summary recv_any=%" PRIu64 " recv_ok=%" PRIu64
-            " bad_size=%" PRIu64 " poll_timeout=%" PRIu64
-            " elapsed_ms=%" PRIu64 " avg_latency_ms=%.3f" " max_latency_ms=%" PRIu64 " min_latency_ms=%" PRIu64 " gap_cnt=%" PRIu64 " dup_cnt=%" PRIu64 " reord_cnt=%" PRIu64 " future_ts_cnt=%" PRIu64 " future_ts_detected=%" PRIu64,
-            rx_recv_any, rx_recv_ok,
-             rx_bad_size, rx_poll_timeout,
-            elapsed_ns / 1000000, (latency_sample_cnt > 0 ? (double)latency_sum_ns / latency_sample_cnt / 1000000.0 : 0.0),
-            max_latency_ns / 1000000, min_latency_ns / 1000000,
-            gap_cnt, dup_cnt, reord_cnt, future_ts_cnt, future_ts_detected);
-    write_log_line(fp, "INFO", msg);
-
-    write_log_line(fp, "INFO", "rx end");
-    fclose(fp);
+    if (files.log_fp) {
+        write_summary(&files, &totals, elapsed_ns);
+        write_log_line(files.log_fp, "INFO", "rx end");
+    }
+    
+    close_output_files(&files);
     close(sock);
 
     printf("rx finished\n");
