@@ -26,6 +26,7 @@
  */
 
 #define FRAME_V0_PAYLOAD_BYTES 48
+#define FRAME_V1_PAYLOAD_MAX_BYTES 1024
 
 typedef struct {
     uint32_t seq;                              // 単調増加シーケンス番号
@@ -38,3 +39,22 @@ _Static_assert(offsetof(FrameV0, seq) == 0, "FrameV0.seq offset must be 0");
 _Static_assert(offsetof(FrameV0, timestamp_ns) == 8, "FrameV0.timestamp_ns offset must be 8");
 _Static_assert(offsetof(FrameV0, payload) == 16, "FrameV0.payload offset must be 16");
 _Static_assert(sizeof(FrameV0) == 64, "sizeof(FrameV0) must be 64");
+
+/*
+ * Frame v1 header
+ *
+ * - v1 のヘッダ項目を表す作業用定義
+ * - この struct 自体は wire format の契約ではない
+ * - wire format は別途定義した byte offset / 長さ定数を唯一の正とする
+ */
+
+typedef struct {
+    uint32_t preamble;                          // フレーム開始識別子（固定値）
+    uint8_t  version;                           // プロトコルバージョン
+    uint8_t  header_len;                       // ヘッダ長（byte）
+    uint16_t payload_len;                      // このフレームに含まれる payload の実長（byte）
+    uint32_t seq;                              // 単調増加シーケンス番号
+    uint64_t tx_ts;                     // 送信側が付与する時刻（単位: ns）
+    uint8_t  flags;                            // 将来拡張用フラグ
+    uint32_t crc32;                            // CRC32 値
+} FrameV1Header;
