@@ -37,6 +37,7 @@ SRC_DIR := src
 # 「最終的に何ができるか」が見えやすいよう変数化している
 TX := $(BIN_DIR)/tx
 RX := $(BIN_DIR)/rx
+FRAME_V1_WIRE := $(SRC_DIR)/frame_v1_wire.c
 
 # .PHONY は「同名のファイルが存在しても、これはファイルではなくコマンド名として扱う」
 # 例: clean という名前のファイルが偶然あっても、make clean が壊れない
@@ -56,19 +57,19 @@ $(BIN_DIR):
 # | $(BIN_DIR) は「順序だけ必要な依存関係（order-only prerequisite）」
 #   - bin/ が先に必要
 #   - ただし bin/ の更新時刻が変わっても tx を無駄に再ビルドしない
-$(TX): $(SRC_DIR)/tx.c | $(BIN_DIR)
-	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
+$(TX): $(SRC_DIR)/tx.c $(FRAME_V1_WIRE) | $(BIN_DIR)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 # 自動変数の意味（上の行で使っている）
 #   $@ : ターゲット名（ここでは bin/tx）
-#   $< : 最初の依存ファイル（ここでは src/tx.c）
+#   $^ : すべての通常依存ファイル（ここでは src/tx.c と src/frame_v1_wire.c）
 #
 # つまり上のコマンドは実質:
-#   gcc ... -o bin/tx src/tx.c
+#   gcc ... -o bin/tx src/tx.c src/frame_v1_wire.c
 
 # rx をビルドするルール（txと同じ考え方）
-$(RX): $(SRC_DIR)/rx.c | $(BIN_DIR)
-	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
+$(RX): $(SRC_DIR)/rx.c $(FRAME_V1_WIRE) | $(BIN_DIR)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 # 10秒実行のショートカット
 # 「make run10」で、ビルド→実行スクリプトの順に動く

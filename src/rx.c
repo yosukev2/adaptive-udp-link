@@ -40,6 +40,7 @@
 #include <stdbool.h>
 
 #include "frame.h"
+#include "frame_v1_wire.h"
 
 static volatile sig_atomic_t g_stop_requested = 0;
 
@@ -74,6 +75,7 @@ typedef struct {
     const char *log_path;  // ログファイルパス
     const char *csv_in_1sec_log_path;  // １秒ごとの統計ログ（rx_stats）をCSV形式で出力する場合のファイルパス（オプション、未指定ならCSV出力しない）
     const char *csv_by_1recv_log_path;  // 受信ごとの統計ログ（rx_stats）をCSV形式で出力する場合のファイルパス（オプション、未指定ならCSV出力しない）
+    int crc32_test_mode;  // ハードコードした v1 フレームで CRC32 を確認する
 } RxConfig;
 
 typedef struct {
@@ -138,7 +140,7 @@ typedef struct {
 
 static void print_usage(const char *prog) {
     fprintf(stderr,
-            "Usage: %s --bind-ip <ip> --port <port> --duration-sec <sec> --log-path <path> [--csv-in-1sec-log-path <path>] [--csv-by-1recv-log-path <path>]\n",
+            "Usage: %s --bind-ip <ip> --port <port> --duration-sec <sec> --log-path <path> [--csv-in-1sec-log-path <path>] [--csv-by-1recv-log-path <path>] [--crc32-test]\n",
             prog);
 }
 
@@ -163,6 +165,7 @@ static int parse_args(int argc, char **argv, RxConfig *cfg) {
         {"log-path", required_argument, 0, 4},
         {"csv-in-1sec-log-path", required_argument, 0, 5},
         {"csv-by-1recv-log-path", required_argument, 0, 6},
+        {"crc32-test", no_argument, 0, 7},
         {0, 0, 0, 0}
     };
 
@@ -199,11 +202,18 @@ static int parse_args(int argc, char **argv, RxConfig *cfg) {
             case 6:
                 cfg->csv_by_1recv_log_path = optarg;
                 break;
+            case 7:
+                cfg->crc32_test_mode = 1;
+                break;
 
             default:
                 print_usage(argv[0]);
                 return -1;
         }
+    }
+
+    if (cfg->crc32_test_mode) {
+        return 0;
     }
 
     if (!cfg->log_path || cfg->port <= 0 || cfg->port > 65535 || cfg->duration_sec <= 0) {
@@ -297,12 +307,12 @@ static void write_summary(const RxFiles *files, const RxTotals *totals, uint64_t
         totals->recv_ok,
         totals->bad_size,
         totals->poll_timeout,
-        elapsed_ns / 1000000ULL,
+        elapsed_ns / UINT64_C(1000000),
         (totals->latency_sample_cnt > 0)
             ? (double)totals->latency_sum_ns / (double)totals->latency_sample_cnt / 1000000.0
             : 0.0,
-        totals->max_latency_ns / 1000000ULL,
-        totals->min_latency_ns / 1000000ULL,
+        totals->max_latency_ns / UINT64_C(1000000),
+        totals->min_latency_ns / UINT64_C(1000000),
         totals->gap_cnt,
         totals->dup_cnt,
         totals->reord_cnt,
@@ -441,6 +451,23 @@ static void write_log_per_1sec(const RxFiles *files, RxTimingState *ts, WindowSt
 
 }
 
+static int run_crc32_test_mode(void) {
+    FrameV1Header frame = {0};
+    uint8_t frame_bytes[FRAME_V1_MAX_WIRE_BYTES] = {0};
+    size_t frame_len = 0;
+
+    if (frame_v1_build_crc32_test_frame(&frame, frame_bytes, sizeof(frame_bytes), &frame_len) != 0) {
+        fprintf(stderr, "frame_v1_build_crc32_test_frame failed\n");
+        return 1;
+    }
+
+    printf("crc32 test mode\n");
+    printf("payload_len=%zu seq=0x%08" PRIX32 " tx_ts=0x%016" PRIX64 "\n",
+           (size_t)frame.payload_len, frame.seq, frame.tx_ts);
+    printf("crc32=0x%08" PRIX32 " frame_len=%zu\n", frame.crc32, frame_len);
+    return 0;
+}
+
 int main(int argc, char **argv) {
 
     RxConfig cfg = {0};
@@ -455,6 +482,10 @@ int main(int argc, char **argv) {
 
     if (parse_args(argc, argv, &cfg) != 0) {
         return 1;
+    }
+
+    if (cfg.crc32_test_mode) {
+        return run_crc32_test_mode();
     }
 
     if (open_output_files(&cfg, &files) != 0) {
@@ -617,9 +648,9 @@ int main(int argc, char **argv) {
         }
         while (ts.now_for_stats_ns >= ts.next_stats_ns ) {
             ts.cur_idx = ts.win_idx % 2;
-            write_log_per_1sec(&files, &ts);
+            write_log_per_1sec(&files, &ts, &ts.win_stats[ts.cur_idx]);
 
-            ts.next_stats_ns += 1000000000ULL;            
+            ts.next_stats_ns += 1000000000ULL;
             ts.win_stats[ts.cur_idx] = (WindowStats){0};
             ts.win_idx++;
         }

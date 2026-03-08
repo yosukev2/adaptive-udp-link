@@ -4,7 +4,7 @@
 //   - UDP送信プログラム（tx）のエントリポイント
 //   - CLI引数の解析（dst-ip / dst-port / rate-hz / duration-sec / log-path）
 //   - CLOCK_MONOTONIC ベースの固定レート送信ループ
-//   - FrameV0 に seq / timestamp_ns を設定して UDP送信
+//   - Frame v1 を手動 serialize して UDP送信
 //   - ログ出力（start / summary / end）
 //
 // このファイルが担当すること
@@ -19,7 +19,7 @@
 //   - 高度な送信統計 / 可視化
 //
 // 計測の前提と限界（重要）
-//   - timestamp_ns は CLOCK_MONOTONIC の送信時刻
+//   - tx_ts は CLOCK_MONOTONIC の送信時刻
 //   - avg_rate_hz は elapsed_ns に対する実測平均
 //   - sendto の成功は受信側への到達保証を意味しない
 #include <errno.h>
@@ -36,7 +36,7 @@
 #include <stddef.h>
 #include <inttypes.h>
 
-#include "frame.h"
+#include "frame_v1_wire.h"
 
 typedef struct {
     const char *dst_ip;    // 送信先IP（例: "127.0.0.1"）
@@ -44,6 +44,8 @@ typedef struct {
     int rate_hz;           // 送信レート（Hz）
     int duration_sec;      // 実行時間
     const char *log_path;  // ログファイルパス
+    int version;           // プロトコルバージョン（現状は v1 固定）
+    int crc32_test_mode;   // ハードコードした v1 フレームで CRC32 を確認する
 } TxConfig;
 
 typedef struct {
@@ -65,7 +67,7 @@ typedef struct {
 
 static void print_usage(const char *prog) {
     fprintf(stderr,
-            "Usage: %s --dst-ip <ip> --dst-port <port> --rate-hz <hz> --duration-sec <sec> --log-path <path>\n",
+            "Usage: %s --dst-ip <ip> --dst-port <port> --rate-hz <hz> --duration-sec <sec> --log-path <path> [--version <n>] [--crc32-test]\n",
             prog);
 }
 
@@ -83,12 +85,16 @@ static int parse_args(int argc, char **argv, TxConfig *cfg) {
     int opt;
     int option_index = 0;
 
+    cfg->version = (int)kFrameV1Version;
+
     static struct option long_opts[] = {
         {"dst-ip", required_argument, 0, 1},
         {"dst-port", required_argument, 0, 2},
         {"rate-hz", required_argument, 0, 3},
         {"duration-sec", required_argument, 0, 4},
         {"log-path", required_argument, 0, 5},
+        {"version", required_argument, 0, 6},
+        {"crc32-test", no_argument, 0, 7},
         {0, 0, 0, 0}
     };
 
@@ -125,15 +131,34 @@ static int parse_args(int argc, char **argv, TxConfig *cfg) {
             case 5:
                 cfg->log_path = optarg;
                 break;
-
+            case 6:
+                if (parse_int(optarg, &cfg->version) != 0) {
+                    fprintf(stderr, "Invalid --version: %s\n", optarg);
+                    print_usage(argv[0]);
+                    return -1;
+                }
+                break;
+            case 7:
+                cfg->crc32_test_mode = 1;
+                break;
             default:
                 print_usage(argv[0]);
                 return -1;
         }
     }
 
+    if (cfg->crc32_test_mode) {
+        return 0;
+    }
+
     if (!cfg->dst_ip || !cfg->log_path || cfg->dst_port <= 0 || cfg->dst_port > 65535 ||
         cfg->rate_hz <= 0 || cfg->duration_sec <= 0) {
+        print_usage(argv[0]);
+        return -1;
+    }
+
+    if (cfg->version != (int)kFrameV1Version) {
+        fprintf(stderr, "Unsupported --version: %d (expected %u)\n", cfg->version, kFrameV1Version);
         print_usage(argv[0]);
         return -1;
     }
@@ -235,6 +260,23 @@ static void timespec_add_ns(struct timespec *t, uint64_t ns) {
     }
 }
 
+static int run_crc32_test_mode(void) {
+    FrameV1Header frame = {0};
+    uint8_t frame_bytes[FRAME_V1_MAX_WIRE_BYTES] = {0};
+    size_t frame_len = 0;
+
+    if (frame_v1_build_crc32_test_frame(&frame, frame_bytes, sizeof(frame_bytes), &frame_len) != 0) {
+        fprintf(stderr, "frame_v1_build_crc32_test_frame failed\n");
+        return 1;
+    }
+
+    printf("crc32 test mode\n");
+    printf("payload_len=%zu seq=0x%08" PRIX32 " tx_ts=0x%016" PRIX64 "\n",
+           (size_t)frame.payload_len, frame.seq, frame.tx_ts);
+    printf("crc32=0x%08" PRIX32 " frame_len=%zu\n", frame.crc32, frame_len);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     TxConfig cfg = {0};
     TxFiles files = {0};
@@ -243,6 +285,10 @@ int main(int argc, char **argv) {
 
     if (parse_args(argc, argv, &cfg) != 0) {
         return 1;
+    }
+
+    if (cfg.crc32_test_mode) {
+        return run_crc32_test_mode();
     }
 
     if (open_output_files(&cfg, &files) != 0) {
