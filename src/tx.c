@@ -44,6 +44,7 @@ typedef struct {
     int rate_hz;           // 送信レート（Hz）
     int duration_sec;      // 実行時間
     const char *log_path;  // ログファイルパス
+    int payload_len;       // 送信する payload 長（byte）
     int version;           // プロトコルバージョン（現状は v1 固定）
     int crc32_test_mode;   // ハードコードした v1 フレームで CRC32 を確認する
 } TxConfig;
@@ -67,7 +68,7 @@ typedef struct {
 
 static void print_usage(const char *prog) {
     fprintf(stderr,
-            "Usage: %s --dst-ip <ip> --dst-port <port> --rate-hz <hz> --duration-sec <sec> --log-path <path> [--version <n>] [--crc32-test]\n",
+            "Usage: %s --dst-ip <ip> --dst-port <port> --rate-hz <hz> --duration-sec <sec> --log-path <path> [--payload-len <n>] [--version <n>] [--crc32-test]\n",
             prog);
 }
 
@@ -86,6 +87,7 @@ static int parse_args(int argc, char **argv, TxConfig *cfg) {
     int option_index = 0;
 
     cfg->version = (int)kFrameV1Version;
+    cfg->payload_len = FRAME_V0_PAYLOAD_BYTES;
 
     static struct option long_opts[] = {
         {"dst-ip", required_argument, 0, 1},
@@ -95,6 +97,7 @@ static int parse_args(int argc, char **argv, TxConfig *cfg) {
         {"log-path", required_argument, 0, 5},
         {"version", required_argument, 0, 6},
         {"crc32-test", no_argument, 0, 7},
+        {"payload-len", required_argument, 0, 8},
         {0, 0, 0, 0}
     };
 
@@ -141,6 +144,13 @@ static int parse_args(int argc, char **argv, TxConfig *cfg) {
             case 7:
                 cfg->crc32_test_mode = 1;
                 break;
+            case 8:
+                if (parse_int(optarg, &cfg->payload_len) != 0) {
+                    fprintf(stderr, "Invalid --payload-len: %s\n", optarg);
+                    print_usage(argv[0]);
+                    return -1;
+                }
+                break;
             default:
                 print_usage(argv[0]);
                 return -1;
@@ -153,6 +163,11 @@ static int parse_args(int argc, char **argv, TxConfig *cfg) {
 
     if (!cfg->dst_ip || !cfg->log_path || cfg->dst_port <= 0 || cfg->dst_port > 65535 ||
         cfg->rate_hz <= 0 || cfg->duration_sec <= 0) {
+        print_usage(argv[0]);
+        return -1;
+    }
+    if (cfg->payload_len < 0 || cfg->payload_len > FRAME_V1_PAYLOAD_MAX_BYTES) {
+        fprintf(stderr, "Invalid --payload-len: %d (expected 0..%d)\n", cfg->payload_len, FRAME_V1_PAYLOAD_MAX_BYTES);
         print_usage(argv[0]);
         return -1;
     }
@@ -260,6 +275,12 @@ static void timespec_add_ns(struct timespec *t, uint64_t ns) {
     }
 }
 
+static void fill_payload_pattern(uint8_t *payload, size_t payload_len) {
+    for (size_t i = 0; i < payload_len; i++) {
+        payload[i] = (uint8_t)(i & 0xFFU);
+    }
+}
+
 static int run_crc32_test_mode(void) {
     FrameV1Header frame = {0};
     uint8_t frame_bytes[FRAME_V1_MAX_WIRE_BYTES] = {0};
@@ -282,6 +303,10 @@ int main(int argc, char **argv) {
     TxFiles files = {0};
     TxTotals totals = {0};
     TxTimingState ts = {0};
+    FrameV1Header frame = {0};
+    uint8_t payload[FRAME_V1_PAYLOAD_MAX_BYTES] = {0};
+    uint8_t frame_bytes[FRAME_V1_MAX_WIRE_BYTES] = {0};
+    int logged_first_frame = 0;
 
     if (parse_args(argc, argv, &cfg) != 0) {
         return 1;
@@ -296,20 +321,20 @@ int main(int argc, char **argv) {
     }
 
     char buf[256];
+    fill_payload_pattern(payload, (size_t)cfg.payload_len);
 
     if (files.log_fp) {
         snprintf(buf, sizeof(buf),
-                 "frame_v0 sizeof=%zu payload_bytes=%d offsets(seq=%zu ts=%zu payload=%zu)",
-                 sizeof(FrameV0),
-                 FRAME_V0_PAYLOAD_BYTES,
-                 offsetof(FrameV0, seq),
-                 offsetof(FrameV0, timestamp_ns),
-                 offsetof(FrameV0, payload));
+                 "frame_v1 config version=%u header_len=%u payload_len=%d payload_max=%d",
+                 kFrameV1Version,
+                 (unsigned)FRAME_V1_WIRE_HEADER_LEN,
+                 cfg.payload_len,
+                 FRAME_V1_PAYLOAD_MAX_BYTES);
         write_log_line(files.log_fp, "INFO", buf);
 
         snprintf(buf, sizeof(buf),
-                 "tx start dst=%s:%d rate_hz=%d duration_sec=%d",
-                 cfg.dst_ip, cfg.dst_port, cfg.rate_hz, cfg.duration_sec);
+                 "tx start dst=%s:%d rate_hz=%d duration_sec=%d payload_len=%d",
+                 cfg.dst_ip, cfg.dst_port, cfg.rate_hz, cfg.duration_sec, cfg.payload_len);
         write_log_line(files.log_fp, "INFO", buf);
     }
 
@@ -329,9 +354,6 @@ int main(int argc, char **argv) {
         close_output_files(&files);
         return 1;
     }
-
-    FrameV0 frame;
-    memset(&frame, 0, sizeof(frame));
 
     if (clock_gettime(CLOCK_MONOTONIC, &ts.next_send) != 0) {
         perror("clock_gettime");
@@ -362,6 +384,8 @@ int main(int argc, char **argv) {
     }
 
     while (ts.now_ns - ts.t_start_ns < (uint64_t)cfg.duration_sec * 1000000000ULL) {
+        size_t frame_len = 0;
+
         timespec_add_ns(&ts.next_send, ts.period_ns);
         clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts.next_send, NULL);
 
@@ -371,22 +395,39 @@ int main(int argc, char **argv) {
         }
 
         memset(&frame, 0, sizeof(frame));
+        memset(frame_bytes, 0, sizeof(frame_bytes));
         if (now_monotonic_ns(&ts.tx_ts_ns) != 0) {
             write_log_line(files.log_fp, "ERROR", "clock_gettime failed before send");
             break;
         }
 
         frame.seq = totals.seq;
-        frame.timestamp_ns = ts.tx_ts_ns;
+        frame.tx_ts = ts.tx_ts_ns;
+        frame.flags = kFrameV1FlagsNone;
+        if (frame_v1_build(&frame, payload, (size_t)cfg.payload_len, frame_bytes, sizeof(frame_bytes), &frame_len) != 0) {
+            write_log_line(files.log_fp, "ERROR", "frame_v1_build failed");
+            break;
+        }
+        if (!logged_first_frame && files.log_fp) {
+            snprintf(buf, sizeof(buf),
+                     "frame_v1 first_frame version=%u payload_len=%u seq=%" PRIu32 " crc32=0x%08" PRIX32 " frame_len=%zu",
+                     frame.version,
+                     frame.payload_len,
+                     frame.seq,
+                     frame.crc32,
+                     frame_len);
+            write_log_line(files.log_fp, "INFO", buf);
+            logged_first_frame = 1;
+        }
 
-        ssize_t sent = sendto(sock, &frame, sizeof(frame), 0, (struct sockaddr *)&dest, sizeof(dest));
+        ssize_t sent = sendto(sock, frame_bytes, frame_len, 0, (struct sockaddr *)&dest, sizeof(dest));
         if (sent < 0) {
             perror("sendto");
             write_log_line(files.log_fp, "ERROR", "sendto failed");
             break;
         }
 
-        if ((size_t)sent != sizeof(frame)) {
+        if ((size_t)sent != frame_len) {
             write_log_line(files.log_fp, "ERROR", "sendto returned unexpected size");
             break;
         }
