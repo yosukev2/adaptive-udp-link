@@ -60,6 +60,28 @@ static void write_u64_be(uint8_t *dst, uint64_t value) {
     dst[7] = (uint8_t)value;
 }
 
+static uint16_t read_u16_be(const uint8_t *src) {
+    return (uint16_t)(((uint16_t)src[0] << 8) | (uint16_t)src[1]);
+}
+
+static uint32_t read_u32_be(const uint8_t *src) {
+    return ((uint32_t)src[0] << 24) |
+           ((uint32_t)src[1] << 16) |
+           ((uint32_t)src[2] << 8) |
+           (uint32_t)src[3];
+}
+
+static uint64_t read_u64_be(const uint8_t *src) {
+    return ((uint64_t)src[0] << 56) |
+           ((uint64_t)src[1] << 48) |
+           ((uint64_t)src[2] << 40) |
+           ((uint64_t)src[3] << 32) |
+           ((uint64_t)src[4] << 24) |
+           ((uint64_t)src[5] << 16) |
+           ((uint64_t)src[6] << 8) |
+           (uint64_t)src[7];
+}
+
 // 将来、純理論版(MSB-first, 0x04C11DB7, init=0, xorout=0)へ切り替えるなら、
 // table生成のシフト方向、更新式、polynomial、init/xorout をまとめて差し替える。
 static void init_crc32_table(void) {
@@ -231,6 +253,80 @@ int frame_v1_validate_crc(
     }
 
     return (recalculated_crc == frame->crc32) ? 1 : 0;
+}
+
+int frame_v1_parse(
+    const uint8_t *buf,
+    size_t len,
+    FrameV1Parsed *out
+) {
+    size_t expected_len = 0;
+
+    if (!buf || !out) {
+        return -1;
+    }
+    if (len < FRAME_V1_WIRE_HEADER_LEN) {
+        return -1;
+    }
+
+    out->header.preamble = read_u32_be(&buf[FRAME_V1_PREAMBLE_OFFSET]);
+    out->header.version = buf[FRAME_V1_VERSION_OFFSET];
+    out->header.header_len = buf[FRAME_V1_HEADER_LEN_OFFSET];
+    out->header.payload_len = read_u16_be(&buf[FRAME_V1_PAYLOAD_LEN_OFFSET]);
+    out->header.seq = read_u32_be(&buf[FRAME_V1_SEQ_OFFSET]);
+    out->header.tx_ts = read_u64_be(&buf[FRAME_V1_TX_TS_OFFSET]);
+    out->header.flags = buf[FRAME_V1_FLAGS_OFFSET];
+    out->header.crc32 = read_u32_be(&buf[FRAME_V1_CRC32_OFFSET]);
+
+    expected_len = FRAME_V1_WIRE_HEADER_LEN + (size_t)out->header.payload_len;
+    if (expected_len != len || expected_len > FRAME_V1_MAX_WIRE_BYTES) {
+        return -1;
+    }
+
+    out->payload = &buf[FRAME_V1_WIRE_HEADER_LEN];
+    out->payload_len = (size_t)out->header.payload_len;
+    out->frame_len = expected_len;
+    return 0;
+}
+
+int frame_v1_validate_header(const FrameV1Parsed *parsed) {
+    if (!parsed) {
+        return -1;
+    }
+    if (parsed->header.preamble != kFrameV1Preamble) {
+        return -1;
+    }
+    if (parsed->header.version != kFrameV1Version) {
+        return -1;
+    }
+    if (parsed->header.header_len != (uint8_t)FRAME_V1_WIRE_HEADER_LEN) {
+        return -1;
+    }
+    if (parsed->payload_len > FRAME_V1_PAYLOAD_MAX_BYTES) {
+        return -1;
+    }
+    if (parsed->frame_len != FRAME_V1_WIRE_HEADER_LEN + parsed->payload_len) {
+        return -1;
+    }
+    return 0;
+}
+
+int frame_v1_parse_and_validate(
+    const uint8_t *buf,
+    size_t len,
+    FrameV1Parsed *out
+) {
+    int crc_ok = 0;
+
+    if (frame_v1_parse(buf, len, out) != 0) {
+        return -1;
+    }
+    if (frame_v1_validate_header(out) != 0) {
+        return -1;
+    }
+
+    crc_ok = frame_v1_validate_crc(&out->header, out->payload, out->payload_len);
+    return (crc_ok == 1) ? 0 : -1;
 }
 
 int frame_v1_build(

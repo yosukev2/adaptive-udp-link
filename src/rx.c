@@ -88,6 +88,7 @@ typedef struct {
     uint64_t recv_any;
     uint64_t recv_ok;
     uint64_t bad_size;
+    uint64_t bad_crc;
     uint64_t poll_timeout;
     uint64_t gap_cnt;
     uint64_t dup_cnt;
@@ -298,7 +299,7 @@ static void write_summary(const RxFiles *files, const RxTotals *totals, uint64_t
         msg,
         sizeof(msg),
         "rx summary recv_any=%" PRIu64 " recv_ok=%" PRIu64
-        " bad_size=%" PRIu64 " poll_timeout=%" PRIu64
+        " bad_size=%" PRIu64 " bad_crc=%" PRIu64 " poll_timeout=%" PRIu64
         " elapsed_ms=%" PRIu64 " avg_latency_ms=%.3f"
         " max_latency_ms=%" PRIu64 " min_latency_ms=%" PRIu64
         " gap_cnt=%" PRIu64 " dup_cnt=%" PRIu64 " reord_cnt=%" PRIu64
@@ -306,6 +307,7 @@ static void write_summary(const RxFiles *files, const RxTotals *totals, uint64_t
         totals->recv_any,
         totals->recv_ok,
         totals->bad_size,
+        totals->bad_crc,
         totals->poll_timeout,
         elapsed_ns / UINT64_C(1000000),
         (totals->latency_sample_cnt > 0)
@@ -353,7 +355,7 @@ static int build_bind_addr(const char *ip, int port, struct sockaddr_in *out) {
 }
 
 static void update_seq_stats(
-    const FrameV0 *frame,
+    uint32_t seq_value,
     SeqState *seq,
     RxTotals *totals,
     RxTimingState *ts,
@@ -362,33 +364,33 @@ static void update_seq_stats(
     ts->gap = 0;
 
     if (seq->has_prev_seq) {
-        if (seq->prev_seq == frame->seq) {
+        if (seq->prev_seq == seq_value) {
             totals->dup_cnt++;
             win->dup_cnt++;
-        } else if (seq->prev_seq < frame->seq) {
-            ts->gap = frame->seq - seq->prev_seq - 1;
+        } else if (seq->prev_seq < seq_value) {
+            ts->gap = seq_value - seq->prev_seq - 1;
             totals->gap_cnt += ts->gap;
             win->gap_cnt += ts->gap;
-            seq->prev_seq = frame->seq;
-        } else if (frame->seq < seq->prev_seq) {
+            seq->prev_seq = seq_value;
+        } else if (seq_value < seq->prev_seq) {
             totals->reord_cnt++;
             win->reord_cnt++;
         }
     } else {
         seq->has_prev_seq = true;
-        seq->prev_seq = frame->seq;
+        seq->prev_seq = seq_value;
     }
 }
 
 static void update_latency_stats(
-    const FrameV0 *frame,
+    uint64_t tx_ts_ns,
     RxTotals *totals,
     RxTimingState *ts,
     WindowStats *win
 ) {
     ts->latency = 0;
-    if (ts->recv_now_ns >= frame->timestamp_ns) {
-        ts->latency = ts->recv_now_ns - frame->timestamp_ns;
+    if (ts->recv_now_ns >= tx_ts_ns) {
+        ts->latency = ts->recv_now_ns - tx_ts_ns;
         totals->latency_sum_ns += ts->latency;
 
         totals->latency_sample_cnt++;
@@ -410,17 +412,17 @@ static void update_latency_stats(
     } else {
         totals->future_ts_cnt++;
     }
-    if (ts->recv_now_ns < frame->timestamp_ns) {
+    if (ts->recv_now_ns < tx_ts_ns) {
         totals->future_ts_detected = 1;
     }
 }
 
-static void write_per_recv_csv(const RxFiles *files, const RxTimingState *ts, const FrameV0 *frame) {
+static void write_per_recv_csv(const RxFiles *files, const RxTimingState *ts, uint32_t seq_value, uint64_t tx_ts_ns) {
     char msg_csv_by_1recv[256];
     if (files->csv_by_1recv_fp) {
         snprintf(msg_csv_by_1recv, sizeof(msg_csv_by_1recv),
             "%" PRIu64 ",%" PRIu32 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 "\n",
-            ts->recv_now_ns, frame->seq, frame->timestamp_ns, ts->latency, ts->gap
+            ts->recv_now_ns, seq_value, tx_ts_ns, ts->latency, ts->gap
             );
         fprintf(files->csv_by_1recv_fp, "%s", msg_csv_by_1recv);
     }
@@ -500,11 +502,14 @@ int main(int argc, char **argv) {
 
     char buf[256];
 
-    // Frame v0 の共有定義が見えていることを、起動時ログで確認できるようにする
+    // v1 wire 設定が見えていることを、起動時ログで確認できるようにする
     if (files.log_fp) {
         snprintf(buf, sizeof(buf),
-                 "frame_v0 sizeof=%zu payload_bytes=%d offsets(seq=%zu ts=%zu payload=%zu)",
-                 sizeof(FrameV0),FRAME_V0_PAYLOAD_BYTES,offsetof(FrameV0, seq),offsetof(FrameV0, timestamp_ns),offsetof(FrameV0, payload));
+                 "frame_v1 config version=%u header_len=%u payload_max=%d frame_max=%d",
+                 kFrameV1Version,
+                 (unsigned)FRAME_V1_WIRE_HEADER_LEN,
+                 FRAME_V1_PAYLOAD_MAX_BYTES,
+                 FRAME_V1_MAX_WIRE_BYTES);
         write_log_line(files.log_fp, "INFO", buf);
         snprintf(buf, sizeof(buf),
                 "rx start bind=%s:%d duration_sec=%d",
@@ -544,8 +549,8 @@ int main(int argc, char **argv) {
 
 
     // 起動ログを書き込む
-    FrameV0 frame;
-    uint8_t buf_udp[sizeof(FrameV0)];
+    FrameV1Parsed parsed = {0};
+    uint8_t buf_udp[FRAME_V1_MAX_WIRE_BYTES];
 
     char msg[256];
     ssize_t n = 0;
@@ -625,17 +630,38 @@ int main(int argc, char **argv) {
 
             ts.target_idx = (ts.recv_now_ns >= ts.next_stats_ns) ? ((ts.win_idx + 1) % 2) : (ts.win_idx % 2);
             ts.win_stats[ts.target_idx].recv_any++;
-            if (n != (ssize_t)sizeof(FrameV0)) {
+            if (frame_v1_parse(buf_udp, (size_t)n, &parsed) != 0) {
                 totals.bad_size++;
-                snprintf(msg, sizeof(msg), "unexpected size: %zd (expected %zu)", n, sizeof(FrameV0));
+                snprintf(msg, sizeof(msg), "invalid frame size: %zd", n);
+                write_log_line(files.log_fp, "WARN", msg);
+                continue;
+            }
+            if (frame_v1_validate_header(&parsed) != 0) {
+                totals.bad_size++;
+                snprintf(msg, sizeof(msg),
+                         "invalid frame header: preamble=0x%08" PRIX32 " version=%u header_len=%u payload_len=%zu frame_len=%zu",
+                         parsed.header.preamble,
+                         parsed.header.version,
+                         parsed.header.header_len,
+                         parsed.payload_len,
+                         parsed.frame_len);
+                write_log_line(files.log_fp, "WARN", msg);
+                continue;
+            }
+            if (frame_v1_validate_crc(&parsed.header, parsed.payload, parsed.payload_len) != 1) {
+                totals.bad_crc++;
+                snprintf(msg, sizeof(msg),
+                         "crc mismatch: seq=%" PRIu32 " payload_len=%zu crc32=0x%08" PRIX32,
+                         parsed.header.seq,
+                         parsed.payload_len,
+                         parsed.header.crc32);
                 write_log_line(files.log_fp, "WARN", msg);
                 continue;
             }
 
-            memcpy(&frame, buf_udp, sizeof(frame));
-            update_seq_stats(&frame, &seq_state, &totals, &ts, &ts.win_stats[ts.target_idx]);
-            update_latency_stats(&frame, &totals, &ts, &ts.win_stats[ts.target_idx]);
-            write_per_recv_csv(&files, &ts, &frame);
+            update_seq_stats(parsed.header.seq, &seq_state, &totals, &ts, &ts.win_stats[ts.target_idx]);
+            update_latency_stats(parsed.header.tx_ts, &totals, &ts, &ts.win_stats[ts.target_idx]);
+            write_per_recv_csv(&files, &ts, parsed.header.seq, parsed.header.tx_ts);
 
             totals.recv_ok++;
 
