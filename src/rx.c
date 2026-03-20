@@ -136,6 +136,13 @@ typedef struct {
     WindowStats win_stats[2];
 } RxTimingState;
 
+typedef enum {
+    RX_FRAME_OK = 0,
+    RX_FRAME_BAD_SIZE = 1,
+    RX_FRAME_BAD_HEADER = 2,
+    RX_FRAME_BAD_CRC = 3
+} RxFrameStatus;
+
 
 
 
@@ -354,6 +361,16 @@ static int build_bind_addr(const char *ip, int port, struct sockaddr_in *out) {
     return 0;
 }
 
+static WindowStats *select_window_stats(RxTimingState *ts) {
+    if (ts->recv_now_ns >= ts->next_stats_ns) {
+        ts->target_idx = (ts->win_idx + 1) % 2;
+    } else {
+        ts->target_idx = ts->win_idx % 2;
+    }
+
+    return &ts->win_stats[ts->target_idx];
+}
+
 static void update_seq_stats(
     uint32_t seq_value,
     SeqState *seq,
@@ -428,6 +445,76 @@ static void write_per_recv_csv(const RxFiles *files, const RxTimingState *ts, ui
     }
 }
 
+static void log_bad_frame_size(FILE *log_fp, char *msg, size_t msg_size, ssize_t recv_len) {
+    snprintf(msg, msg_size, "invalid frame size: %zd", recv_len);
+    write_log_line(log_fp, "WARN", msg);
+}
+
+static void log_bad_frame_header(FILE *log_fp, char *msg, size_t msg_size, const FrameV1Parsed *parsed) {
+    snprintf(msg, msg_size,
+             "invalid frame header: preamble=0x%08" PRIX32 " version=%u header_len=%u payload_len=%zu frame_len=%zu",
+             parsed->header.preamble,
+             parsed->header.version,
+             parsed->header.header_len,
+             parsed->payload_len,
+             parsed->frame_len);
+    write_log_line(log_fp, "WARN", msg);
+}
+
+static void log_bad_frame_crc(FILE *log_fp, char *msg, size_t msg_size, const FrameV1Parsed *parsed) {
+    snprintf(msg, msg_size,
+             "crc mismatch: seq=%" PRIu32 " payload_len=%zu crc32=0x%08" PRIX32,
+             parsed->header.seq,
+             parsed->payload_len,
+             parsed->header.crc32);
+    write_log_line(log_fp, "WARN", msg);
+}
+
+static RxFrameStatus validate_received_frame(const uint8_t *buf_udp, size_t recv_len, FrameV1Parsed *parsed) {
+    if (frame_v1_parse(buf_udp, recv_len, parsed) != 0) {
+        return RX_FRAME_BAD_SIZE;
+    }
+    if (frame_v1_validate_header(parsed) != 0) {
+        return RX_FRAME_BAD_HEADER;
+    }
+    if (frame_v1_validate_crc(&parsed->header, parsed->payload, parsed->payload_len) != 1) {
+        return RX_FRAME_BAD_CRC;
+    }
+
+    return RX_FRAME_OK;
+}
+
+static int handle_received_frame(
+    const uint8_t *buf_udp,
+    size_t recv_len,
+    FrameV1Parsed *parsed,
+    RxTotals *totals,
+    char *msg,
+    size_t msg_size,
+    FILE *log_fp
+) {
+    RxFrameStatus status = validate_received_frame(buf_udp, recv_len, parsed);
+
+    switch (status) {
+        case RX_FRAME_OK:
+            return 0;
+        case RX_FRAME_BAD_SIZE:
+            totals->bad_size++;
+            log_bad_frame_size(log_fp, msg, msg_size, (ssize_t)recv_len);
+            return -1;
+        case RX_FRAME_BAD_HEADER:
+            totals->bad_size++;
+            log_bad_frame_header(log_fp, msg, msg_size, parsed);
+            return -1;
+        case RX_FRAME_BAD_CRC:
+            totals->bad_crc++;
+            log_bad_frame_crc(log_fp, msg, msg_size, parsed);
+            return -1;
+    }
+
+    return -1;
+}
+
 static void write_log_per_1sec(const RxFiles *files, RxTimingState *ts, WindowStats *win) {
     char msg[256];
 
@@ -477,6 +564,7 @@ int main(int argc, char **argv) {
     RxTotals totals = {0};
     RxTimingState ts = {0};
     SeqState seq_state = {0};
+    WindowStats *win = NULL;
 
     // rx は bind-ip を省略可能にしておく（利便性のため）
     // 将来、ローカル検証時は 127.0.0.1、複数NIC環境では 0.0.0.0 と使い分けられる
@@ -628,44 +716,26 @@ int main(int argc, char **argv) {
             }
             totals.recv_any++;
 
-            ts.target_idx = (ts.recv_now_ns >= ts.next_stats_ns) ? ((ts.win_idx + 1) % 2) : (ts.win_idx % 2);
-            ts.win_stats[ts.target_idx].recv_any++;
-            if (frame_v1_parse(buf_udp, (size_t)n, &parsed) != 0) {
-                totals.bad_size++;
-                snprintf(msg, sizeof(msg), "invalid frame size: %zd", n);
-                write_log_line(files.log_fp, "WARN", msg);
-                continue;
-            }
-            if (frame_v1_validate_header(&parsed) != 0) {
-                totals.bad_size++;
-                snprintf(msg, sizeof(msg),
-                         "invalid frame header: preamble=0x%08" PRIX32 " version=%u header_len=%u payload_len=%zu frame_len=%zu",
-                         parsed.header.preamble,
-                         parsed.header.version,
-                         parsed.header.header_len,
-                         parsed.payload_len,
-                         parsed.frame_len);
-                write_log_line(files.log_fp, "WARN", msg);
-                continue;
-            }
-            if (frame_v1_validate_crc(&parsed.header, parsed.payload, parsed.payload_len) != 1) {
-                totals.bad_crc++;
-                snprintf(msg, sizeof(msg),
-                         "crc mismatch: seq=%" PRIu32 " payload_len=%zu crc32=0x%08" PRIX32,
-                         parsed.header.seq,
-                         parsed.payload_len,
-                         parsed.header.crc32);
-                write_log_line(files.log_fp, "WARN", msg);
+            win = select_window_stats(&ts);
+            win->recv_any++;
+            if (handle_received_frame(
+                buf_udp,
+                (size_t)n,
+                &parsed,
+                &totals,
+                msg,
+                sizeof(msg),
+                files.log_fp
+            ) != 0) {
                 continue;
             }
 
-            update_seq_stats(parsed.header.seq, &seq_state, &totals, &ts, &ts.win_stats[ts.target_idx]);
-            update_latency_stats(parsed.header.tx_ts, &totals, &ts, &ts.win_stats[ts.target_idx]);
+            update_seq_stats(parsed.header.seq, &seq_state, &totals, &ts, win);
+            update_latency_stats(parsed.header.tx_ts, &totals, &ts, win);
             write_per_recv_csv(&files, &ts, parsed.header.seq, parsed.header.tx_ts);
 
             totals.recv_ok++;
-
-            ts.win_stats[ts.target_idx].recv_ok++;
+            win->recv_ok++;
 
         }
         if (now_monotonic_ns(&ts.now_for_stats_ns) != 0) {
