@@ -4,22 +4,25 @@
 //   - UDP受信プログラム（rx）のエントリポイント
 //   - CLI引数の解析（bind-ip / port / duration-sec / log-path）
 //   - poll ベースの受信ループ
-//   - FrameV0 サイズ確認と最小統計の算出（latency平均 / seq差分ベース欠損推定 / 重複 / 逆順）
-//   - ログ出力（start / summary / end）
+//   - 受信データをストリームバッファへ積み、Framer 経由で FrameV1 を抽出
+//   - 破損フレームを弾き、次の正常 preamble から復帰（resync）
+//   - seq / latency 統計の集計とログ出力
 //
 // このファイルが担当すること
 //   - UDPソケット生成 / bind / 受信待機 / recvfrom
 //   - 実行時間管理（duration_sec）
 //   - 受信イベント / タイムアウト / シグナル割込みの処理
-//   - FrameV0 を前提にした最小統計の集計と summary ログ出力
+//   - RxStreamBuf へのデータ追記と Framer ループの駆動
+//   - resync_count / bad_size / bad_header / bad_crc の集計
+//   - 1秒周期統計と summary ログ出力
 //
 // このファイルが担当しないこと（別段階/別責務）
-//   - Frame内容の高度な検証（magic/version/checksum 等）
+//   - FrameV1 の wire format 定数・serialize/deserialize（→ frame_v1_wire.c）
 //   - 高度な統計（P95/P99, ヒストグラム, ジッタ詳細）
 //   - 可視化 / オフライン集計
 //
 // 計測の前提と限界（重要）
-//   - latency = recv_now(CLOCK_MONOTONIC) - frame.timestamp_ns
+//   - latency = recv_now(CLOCK_MONOTONIC) - frame.tx_ts
 //   - このlatencyは同一マシン/同一クロック系である前提で意味を持つ
 //   - UDPは順序保証がないため、seq差分ベースの欠損は「推定値」
 #include <errno.h>
@@ -64,6 +67,7 @@ static int install_signal_handlers(void) {
     }
     return 0;
 }
+
 // 受信側の設定をまとめる構造体
 //
 // bind_ip をポインタにしている理由は tx.c と同じ。
@@ -90,6 +94,7 @@ typedef struct {
     uint64_t bad_size;
     uint64_t bad_header;
     uint64_t bad_crc;
+    uint64_t resync_count;   // PREAMBLE_MISS / LEN_INVALID / CRC_FAIL で再探索した回数
     uint64_t poll_timeout;
     uint64_t gap_cnt;
     uint64_t dup_cnt;
@@ -106,7 +111,6 @@ typedef struct {
     uint32_t prev_seq;
     bool has_prev_seq;
 } SeqState;
-
 
 typedef struct {
     uint64_t recv_any;
@@ -137,14 +141,24 @@ typedef struct {
     WindowStats win_stats[2];
 } RxTimingState;
 
+// ストリームバッファ
+//
+// recvfrom() で受け取ったバイト列を一時蓄積し、Framer が先頭から消費する。
+// 容量は最大フレーム x4。UDP 1 datagram は最大 FRAME_V1_MAX_WIRE_BYTES なので
+// 実運用では 1 フレーム分しか溜まらないが、将来の拡張や resync 試行に備えて余裕を持たせる。
+#define RX_STREAM_BUF_CAP (FRAME_V1_MAX_WIRE_BYTES * 4)
+
+typedef struct {
+    uint8_t data[RX_STREAM_BUF_CAP];
+    size_t  len;   // バッファに溜まっているバイト数
+} RxStreamBuf;
+
+// Framer の 1 ステップ結果
 typedef enum {
-    RX_FRAME_OK = 0,
-    RX_FRAME_BAD_SIZE = 1,
-    RX_FRAME_BAD_HEADER = 2,
-    RX_FRAME_BAD_CRC = 3
-} RxFrameStatus;
-
-
+    FRAMER_OK        = 0,  // フレーム抽出成功。out に格納済み・バッファ消費済み
+    FRAMER_NEED_MORE = 1,  // バイト不足。次の recvfrom を待つ
+    FRAMER_RESYNCED  = 2,  // 不正データを読み飛ばした。同バッファで再試行せよ
+} FramerResult;
 
 
 static void print_usage(const char *prog) {
@@ -280,8 +294,6 @@ static int open_output_files(const RxConfig *config, RxFiles *files) {
     return 0;
 }
 
-
-
 static void write_log_line(FILE *fp, const char *level, const char *msg) {
     if (!fp || !level || !msg) {
         return;
@@ -307,7 +319,8 @@ static void write_summary(const RxFiles *files, const RxTotals *totals, uint64_t
         msg,
         sizeof(msg),
         "rx summary recv_any=%" PRIu64 " recv_ok=%" PRIu64
-        " bad_size=%" PRIu64 " bad_header=%" PRIu64 " bad_crc=%" PRIu64 " poll_timeout=%" PRIu64
+        " bad_size=%" PRIu64 " bad_header=%" PRIu64 " bad_crc=%" PRIu64
+        " resync_count=%" PRIu64 " poll_timeout=%" PRIu64
         " elapsed_ms=%" PRIu64 " avg_latency_ms=%.3f"
         " max_latency_ms=%" PRIu64 " min_latency_ms=%" PRIu64
         " gap_cnt=%" PRIu64 " dup_cnt=%" PRIu64 " reord_cnt=%" PRIu64
@@ -317,6 +330,7 @@ static void write_summary(const RxFiles *files, const RxTotals *totals, uint64_t
         totals->bad_size,
         totals->bad_header,
         totals->bad_crc,
+        totals->resync_count,
         totals->poll_timeout,
         elapsed_ns / UINT64_C(1000000),
         (totals->latency_sample_cnt > 0)
@@ -333,9 +347,6 @@ static void write_summary(const RxFiles *files, const RxTotals *totals, uint64_t
 
     write_log_line(files->log_fp, "INFO", msg);
 }
-
-
-
 
 static int now_monotonic_ns(uint64_t *out_ns) {
     struct timespec ts;
@@ -420,13 +431,12 @@ static void update_latency_stats(
         }
         if (totals->min_latency_ns == 0 || ts->latency < totals->min_latency_ns) {
             totals->min_latency_ns = ts->latency;
-
         }
         if (ts->latency > win->max_latency_ns) {
-            win->max_latency_ns = ts->latency; 
+            win->max_latency_ns = ts->latency;
         }
         if (ts->latency < win->min_latency_ns || win->min_latency_ns == 0) {
-            win->min_latency_ns = ts->latency; 
+            win->min_latency_ns = ts->latency;
         }
     } else {
         totals->future_ts_cnt++;
@@ -447,74 +457,180 @@ static void write_per_recv_csv(const RxFiles *files, const RxTimingState *ts, ui
     }
 }
 
-static void log_bad_frame_size(FILE *log_fp, char *msg, size_t msg_size, ssize_t recv_len) {
-    snprintf(msg, msg_size, "invalid frame size: %zd", recv_len);
-    write_log_line(log_fp, "WARN", msg);
-}
+// ---------------------------------------------------------------------------
+// ストリームバッファ管理
+// ---------------------------------------------------------------------------
 
-static void log_bad_frame_header(FILE *log_fp, char *msg, size_t msg_size, const FrameV1Parsed *parsed) {
-    snprintf(msg, msg_size,
-             "invalid frame header: preamble=0x%08" PRIX32 " version=%u header_len=%u payload_len=%zu frame_len=%zu",
-             parsed->header.preamble,
-             parsed->header.version,
-             parsed->header.header_len,
-             parsed->payload_len,
-             parsed->frame_len);
-    write_log_line(log_fp, "WARN", msg);
-}
-
-static void log_bad_frame_crc(FILE *log_fp, char *msg, size_t msg_size, const FrameV1Parsed *parsed) {
-    snprintf(msg, msg_size,
-             "crc mismatch: seq=%" PRIu32 " payload_len=%zu crc32=0x%08" PRIX32,
-             parsed->header.seq,
-             parsed->payload_len,
-             parsed->header.crc32);
-    write_log_line(log_fp, "WARN", msg);
-}
-
-static RxFrameStatus validate_received_frame(const uint8_t *buf_udp, size_t recv_len, FrameV1Parsed *parsed) {
-    if (frame_v1_parse(buf_udp, recv_len, parsed) != 0) {
-        return RX_FRAME_BAD_SIZE;
+// データをバッファ末尾に追記する。容量超過時は -1 を返す。
+static int rx_buf_append(RxStreamBuf *buf, const uint8_t *data, size_t len) {
+    if (buf->len + len > RX_STREAM_BUF_CAP) {
+        return -1;
     }
-    if (frame_v1_validate_header(parsed) != 0) {
-        return RX_FRAME_BAD_HEADER;
-    }
-    if (frame_v1_validate_crc(&parsed->header, parsed->payload, parsed->payload_len) != 1) {
-        return RX_FRAME_BAD_CRC;
-    }
-
-    return RX_FRAME_OK;
+    memcpy(&buf->data[buf->len], data, len);
+    buf->len += len;
+    return 0;
 }
 
-static int handle_received_frame(
-    const uint8_t *buf_udp,
-    size_t recv_len,
-    FrameV1Parsed *parsed,
+// バッファ先頭から n バイトを消費する（memmove で詰める）。
+static void rx_buf_consume(RxStreamBuf *buf, size_t n) {
+    if (n >= buf->len) {
+        buf->len = 0;
+        return;
+    }
+    memmove(buf->data, &buf->data[n], buf->len - n);
+    buf->len -= n;
+}
+
+// バッファ内で FrameV1 の preamble（0xA55AC33C、big-endian）を探す。
+// 見つかった先頭 offset を返す。見つからない場合は buf->len を返す。
+static size_t rx_buf_find_preamble(const RxStreamBuf *buf) {
+    // preamble の big-endian バイト列
+    const uint8_t p0 = (uint8_t)(kFrameV1Preamble >> 24);
+    const uint8_t p1 = (uint8_t)(kFrameV1Preamble >> 16);
+    const uint8_t p2 = (uint8_t)(kFrameV1Preamble >> 8);
+    const uint8_t p3 = (uint8_t)(kFrameV1Preamble);
+
+    if (buf->len < 4) {
+        // 4 バイト未満では完全な preamble は確認できない
+        return buf->len;
+    }
+
+    for (size_t i = 0; i <= buf->len - 4; i++) {
+        if (buf->data[i]     == p0 &&
+            buf->data[i + 1] == p1 &&
+            buf->data[i + 2] == p2 &&
+            buf->data[i + 3] == p3) {
+            return i;
+        }
+    }
+
+    return buf->len;
+}
+
+// ---------------------------------------------------------------------------
+// Framer: バッファから FrameV1 を 1 つ抽出する
+//
+// 戻り値:
+//   FRAMER_OK       - 抽出成功。out に格納済み。バッファ消費済み。
+//                     ※ out->payload は消費後に無効。呼び出し元は header.* のみ使うこと。
+//   FRAMER_NEED_MORE - バイト不足。次の recvfrom を待つ。
+//   FRAMER_RESYNCED  - 不正データを 1 以上スキップ。同バッファで再試行せよ。
+//
+// resync_count は PREAMBLE_MISS / LEN_INVALID / HEADER_INVALID / CRC_FAIL ごとに 1 加算。
+// 各エラー専用カウンタ（bad_size / bad_header / bad_crc）も同時に加算する。
+// ---------------------------------------------------------------------------
+static FramerResult rx_framer_step(
+    RxStreamBuf *buf,
+    FrameV1Parsed *out,
     RxTotals *totals,
+    FILE *log_fp,
     char *msg,
-    size_t msg_size,
-    FILE *log_fp
+    size_t msg_size
 ) {
-    RxFrameStatus status = validate_received_frame(buf_udp, recv_len, parsed);
+    // --- preamble 探索 ---
+    size_t preamble_off = rx_buf_find_preamble(buf);
 
-    switch (status) {
-        case RX_FRAME_OK:
-            return 0;
-        case RX_FRAME_BAD_SIZE:
-            totals->bad_size++;
-            log_bad_frame_size(log_fp, msg, msg_size, (ssize_t)recv_len);
-            return -1;
-        case RX_FRAME_BAD_HEADER:
-            totals->bad_header++;
-            log_bad_frame_header(log_fp, msg, msg_size, parsed);
-            return -1;
-        case RX_FRAME_BAD_CRC:
-            totals->bad_crc++;
-            log_bad_frame_crc(log_fp, msg, msg_size, parsed);
-            return -1;
+    if (preamble_off == buf->len) {
+        // preamble が見つからない (PREAMBLE_MISS)
+        // 末尾 3 バイトは次の datagram との境界にまたがる可能性があるため保持する。
+        // バッファが 3 バイト以下の場合は全保持（何もしない）。
+        if (buf->len > 3) {
+            size_t drop = buf->len - 3;
+            totals->resync_count++;
+            totals->bad_size += drop;
+            rx_buf_consume(buf, drop);
+        }
+        return FRAMER_NEED_MORE;
     }
 
-    return -1;
+    if (preamble_off > 0) {
+        // preamble が先頭にない: ゴミをスキップ (PREAMBLE_MISS)
+        totals->resync_count++;
+        totals->bad_size += preamble_off;
+        rx_buf_consume(buf, preamble_off);
+        return FRAMER_RESYNCED;
+    }
+
+    // preamble が offset 0 にある
+
+    // --- ヘッダ長チェック ---
+    if (buf->len < FRAME_V1_WIRE_HEADER_LEN) {
+        return FRAMER_NEED_MORE;
+    }
+
+    // payload_len を先読みして全体長を確認する（parse 前の仮チェック）
+    // FRAME_V1_PAYLOAD_LEN_OFFSET = 6、2 バイト big-endian
+    uint16_t payload_len_peek =
+        ((uint16_t)buf->data[FRAME_V1_PAYLOAD_LEN_OFFSET] << 8) |
+        (uint16_t)buf->data[FRAME_V1_PAYLOAD_LEN_OFFSET + 1];
+
+    if ((size_t)payload_len_peek > FRAME_V1_PAYLOAD_MAX_BYTES) {
+        // LEN_INVALID: preamble 直後のバイトが壊れている。1 バイト進めて再探索。
+        snprintf(msg, msg_size, "framer: payload_len=%u exceeds max=%d, resyncing",
+                 payload_len_peek, FRAME_V1_PAYLOAD_MAX_BYTES);
+        write_log_line(log_fp, "WARN", msg);
+        totals->resync_count++;
+        totals->bad_size++;
+        rx_buf_consume(buf, 1);
+        return FRAMER_RESYNCED;
+    }
+
+    size_t frame_len = FRAME_V1_WIRE_HEADER_LEN + (size_t)payload_len_peek;
+
+    // --- フレーム全体のバイト数チェック ---
+    if (buf->len < frame_len) {
+        return FRAMER_NEED_MORE;
+    }
+
+    // --- parse（deserialize）---
+    if (frame_v1_parse(buf->data, frame_len, out) != 0) {
+        // parse 失敗。preamble は合っているが形式が壊れている。1 バイト進める。
+        snprintf(msg, msg_size, "framer: frame_v1_parse failed, frame_len=%zu", frame_len);
+        write_log_line(log_fp, "WARN", msg);
+        totals->resync_count++;
+        totals->bad_size++;
+        rx_buf_consume(buf, 1);
+        return FRAMER_RESYNCED;
+    }
+
+    // --- header validate ---
+    if (frame_v1_validate_header(out) != 0) {
+        // ヘッダ不正（version / header_len / preamble 値の不一致）。1 バイト進める。
+        snprintf(msg, msg_size,
+                 "framer: invalid header preamble=0x%08" PRIX32 " version=%u header_len=%u"
+                 " payload_len=%zu frame_len=%zu",
+                 out->header.preamble,
+                 out->header.version,
+                 out->header.header_len,
+                 out->payload_len,
+                 out->frame_len);
+        write_log_line(log_fp, "WARN", msg);
+        totals->resync_count++;
+        totals->bad_header++;
+        rx_buf_consume(buf, 1);
+        return FRAMER_RESYNCED;
+    }
+
+    // --- CRC validate ---
+    if (frame_v1_validate_crc(&out->header, out->payload, out->payload_len) != 1) {
+        // CRC 不一致。フレーム境界は分かっているので frame_len バイト丸ごとスキップ。
+        snprintf(msg, msg_size,
+                 "framer: crc mismatch seq=%" PRIu32 " payload_len=%zu crc32=0x%08" PRIX32,
+                 out->header.seq,
+                 out->payload_len,
+                 out->header.crc32);
+        write_log_line(log_fp, "WARN", msg);
+        totals->resync_count++;
+        totals->bad_crc++;
+        rx_buf_consume(buf, frame_len);
+        return FRAMER_RESYNCED;
+    }
+
+    // --- 抽出成功 ---
+    // バッファを消費する。この後 out->payload は無効（バッファが memmove で詰められる）。
+    // 呼び出し元は out->header.seq / out->header.tx_ts のみ参照すること。
+    rx_buf_consume(buf, frame_len);
+    return FRAMER_OK;
 }
 
 static void write_log_per_1sec(const RxFiles *files, RxTimingState *ts, WindowStats *win) {
@@ -525,21 +641,20 @@ static void write_log_per_1sec(const RxFiles *files, RxTimingState *ts, WindowSt
     if (files->csv_in_1sec_fp) {
         snprintf(msg, sizeof(msg),
             "%" PRIu64 ",%.3f,%.3f,%.3f,%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 "\n",
-            ts->elapsed_sec, (double)ts->avg_latency_ns_in_1sec/1000000.0, (double)win->max_latency_ns/1000000.0, 
+            ts->elapsed_sec, (double)ts->avg_latency_ns_in_1sec/1000000.0, (double)win->max_latency_ns/1000000.0,
             (double)win->min_latency_ns/1000000.0, win->recv_any, win->recv_ok, win->gap_cnt, win->dup_cnt, win->reord_cnt);
         fprintf(files->csv_in_1sec_fp, "%s", msg);
     } else {
         snprintf(msg, sizeof(msg),
-            "rx_stats elapsed_sec=%" PRIu64 
-            " avg_latency=%.3f"  
-            " max_latency=%.3f" 
-            " min_latency=%.3f" 
+            "rx_stats elapsed_sec=%" PRIu64
+            " avg_latency=%.3f"
+            " max_latency=%.3f"
+            " min_latency=%.3f"
             " recv_cnt=%" PRIu64 " ok_recv_cnt=%" PRIu64 " gap_cnt=%" PRIu64 " dup_cnt=%" PRIu64 " reord_cnt=%" PRIu64,
-            ts->elapsed_sec, (double)ts->avg_latency_ns_in_1sec/1000000.0, (double)win->max_latency_ns/1000000.0, 
+            ts->elapsed_sec, (double)ts->avg_latency_ns_in_1sec/1000000.0, (double)win->max_latency_ns/1000000.0,
             (double)win->min_latency_ns/1000000.0, win->recv_any, win->recv_ok, win->gap_cnt, win->dup_cnt, win->reord_cnt);
         write_log_line(files->log_fp, "INFO", msg);
     }
-
 }
 
 static int run_crc32_test_mode(void) {
@@ -595,11 +710,13 @@ int main(int argc, char **argv) {
     // v1 wire 設定が見えていることを、起動時ログで確認できるようにする
     if (files.log_fp) {
         snprintf(buf, sizeof(buf),
-                 "frame_v1 config version=%u header_len=%u payload_max=%d frame_max=%d",
+                 "frame_v1 config version=%u header_len=%u payload_max=%d frame_max=%d"
+                 " stream_buf_cap=%d",
                  kFrameV1Version,
                  (unsigned)FRAME_V1_WIRE_HEADER_LEN,
                  FRAME_V1_PAYLOAD_MAX_BYTES,
-                 FRAME_V1_MAX_WIRE_BYTES);
+                 FRAME_V1_MAX_WIRE_BYTES,
+                 RX_STREAM_BUF_CAP);
         write_log_line(files.log_fp, "INFO", buf);
         snprintf(buf, sizeof(buf),
                 "rx start bind=%s:%d duration_sec=%d",
@@ -610,20 +727,20 @@ int main(int argc, char **argv) {
     printf("rx started: bind=%s:%d duration=%d log=%s\n", cfg.bind_ip, cfg.port, cfg.duration_sec, cfg.log_path);
     if (files.csv_in_1sec_fp) printf("csv_in_1sec_log_path=%s\n", cfg.csv_in_1sec_log_path);
     if (files.csv_by_1recv_fp) printf("csv_by_1recv_log_path=%s\n", cfg.csv_by_1recv_log_path);
-    
+
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0) {
         perror("socket");
         close_output_files(&files);
-        return 1;  // または exit(EXIT_FAILURE);
+        return 1;
     }
 
     struct pollfd pfd;
     pfd.fd = sock;
     pfd.events = POLLIN;  // 読み取り可能イベントを待つ
-    pfd.revents = 0; // 見やすさのため初期化（必須ではない）
+    pfd.revents = 0;
 
-    struct sockaddr_in bind_addr={0};
+    struct sockaddr_in bind_addr = {0};
     if (build_bind_addr(cfg.bind_ip, cfg.port, &bind_addr) != 0) {
         close(sock);
         close_output_files(&files);
@@ -637,15 +754,13 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-
-    // 起動ログを書き込む
     FrameV1Parsed parsed = {0};
+    RxStreamBuf stream_buf = {0};
     uint8_t buf_udp[FRAME_V1_MAX_WIRE_BYTES];
 
     char msg[256];
     ssize_t n = 0;
     struct sockaddr_in src_addr;
-
 
     if (now_monotonic_ns(&ts.t_start_ns) != 0) {
         write_log_line(files.log_fp, "ERROR", "clock_gettime failed");
@@ -653,7 +768,7 @@ int main(int argc, char **argv) {
         close_output_files(&files);
         return 1;
     }
-    
+
     ts.next_stats_ns = ts.t_start_ns + 1000000000ULL;
 
     while (1) {
@@ -688,14 +803,12 @@ int main(int argc, char **argv) {
             }
             perror("poll");
             break;
-        }else if (ret == 0) {
+        } else if (ret == 0) {
             totals.poll_timeout++;
-        } 
-        else if (pfd.revents & (POLLERR | POLLNVAL)) {
+        } else if (pfd.revents & (POLLERR | POLLNVAL)) {
             fprintf(stderr, "poll error revents=0x%x\n", pfd.revents);
             break;
-        }
-        else if ( pfd.revents & POLLIN) {
+        } else if (pfd.revents & POLLIN) {
             socklen_t src_len = sizeof(src_addr);
             n = recvfrom(sock, buf_udp, sizeof(buf_udp), 0, (struct sockaddr *)&src_addr, &src_len);
 
@@ -710,8 +823,8 @@ int main(int argc, char **argv) {
                 perror("recvfrom");
                 break;
             }
-            
 
+            // 受信時刻を確定させる（以降の latency 計算はこの値を使う）
             if (now_monotonic_ns(&ts.recv_now_ns) != 0) {
                 write_log_line(files.log_fp, "ERROR", "clock_gettime failed");
                 break;
@@ -720,31 +833,55 @@ int main(int argc, char **argv) {
 
             win = select_window_stats(&ts);
             win->recv_any++;
-            if (handle_received_frame(
-                buf_udp,
-                (size_t)n,
-                &parsed,
-                &totals,
-                msg,
-                sizeof(msg),
-                files.log_fp
-            ) != 0) {
-                continue;
+
+            // ストリームバッファへ追記
+            if (rx_buf_append(&stream_buf, buf_udp, (size_t)n) != 0) {
+                // バッファ容量超過（通常は起きない）。バッファを全クリアして続行。
+                snprintf(msg, sizeof(msg),
+                         "stream_buf overflow: recv_len=%zd buf_len=%zu cap=%d, clearing",
+                         n, stream_buf.len, RX_STREAM_BUF_CAP);
+                write_log_line(files.log_fp, "WARN", msg);
+                stream_buf.len = 0;
+                totals.resync_count++;
+                totals.bad_size++;
             }
 
-            update_seq_stats(parsed.header.seq, &seq_state, &totals, &ts, win);
-            update_latency_stats(parsed.header.tx_ts, &totals, &ts, win);
-            write_per_recv_csv(&files, &ts, parsed.header.seq, parsed.header.tx_ts);
+            // Framer ループ: バッファにフレームがなくなるか NEED_MORE になるまで回す。
+            // busy loop にならない理由:
+            //   FRAMER_RESYNCED は必ず ≥1 バイトを消費するため、
+            //   stream_buf.len が 0 になると次は FRAMER_NEED_MORE が返り break する。
+            for (;;) {
+                FramerResult fr = rx_framer_step(
+                    &stream_buf,
+                    &parsed,
+                    &totals,
+                    files.log_fp,
+                    msg,
+                    sizeof(msg)
+                );
 
-            totals.recv_ok++;
-            win->recv_ok++;
+                if (fr == FRAMER_NEED_MORE) {
+                    break;
+                }
+                if (fr == FRAMER_RESYNCED) {
+                    continue;
+                }
 
+                // FRAMER_OK: parsed.header.* は有効。parsed.payload は無効（消費済み）。
+                update_seq_stats(parsed.header.seq, &seq_state, &totals, &ts, win);
+                update_latency_stats(parsed.header.tx_ts, &totals, &ts, win);
+                write_per_recv_csv(&files, &ts, parsed.header.seq, parsed.header.tx_ts);
+
+                totals.recv_ok++;
+                win->recv_ok++;
+            }
         }
+
         if (now_monotonic_ns(&ts.now_for_stats_ns) != 0) {
             write_log_line(files.log_fp, "ERROR", "clock_gettime failed");
             break;
         }
-        while (ts.now_for_stats_ns >= ts.next_stats_ns ) {
+        while (ts.now_for_stats_ns >= ts.next_stats_ns) {
             ts.cur_idx = ts.win_idx % 2;
             write_log_per_1sec(&files, &ts, &ts.win_stats[ts.cur_idx]);
 
@@ -752,7 +889,6 @@ int main(int argc, char **argv) {
             ts.win_stats[ts.cur_idx] = (WindowStats){0};
             ts.win_idx++;
         }
-        
     }
 
     uint64_t elapsed_ns = 0;
@@ -766,7 +902,7 @@ int main(int argc, char **argv) {
         write_summary(&files, &totals, elapsed_ns);
         write_log_line(files.log_fp, "INFO", "rx end");
     }
-    
+
     close_output_files(&files);
     close(sock);
 
