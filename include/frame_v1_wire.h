@@ -30,6 +30,14 @@ static const uint32_t kFrameV1Preamble = 0xA55AC33CU;
 static const uint8_t kFrameV1Version = 1U;
 static const uint8_t kFrameV1FlagsNone = 0U;
 
+typedef struct {
+    FrameV1Header header;
+    /* payload は入力 buf を借用する。buf の lifetime を超えて保持してはいけない。 */
+    const uint8_t *payload;
+    size_t payload_len;
+    size_t frame_len;
+} FrameV1Parsed;
+
 uint32_t frame_v1_crc32(const uint8_t *data, size_t len);
 
 int frame_v1_recalculate_crc(
@@ -43,6 +51,20 @@ int frame_v1_validate_crc(
     const FrameV1Header *frame,
     const uint8_t *payload,
     size_t payload_len
+);
+
+int frame_v1_parse(
+    const uint8_t *buf,
+    size_t len,
+    FrameV1Parsed *out
+);
+
+int frame_v1_validate_header(const FrameV1Parsed *parsed);
+
+int frame_v1_parse_and_validate(
+    const uint8_t *buf,
+    size_t len,
+    FrameV1Parsed *out
 );
 
 int frame_v1_build(
