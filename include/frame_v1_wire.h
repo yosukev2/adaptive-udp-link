@@ -32,6 +32,7 @@ static const uint8_t kFrameV1FlagsNone = 0U;
 
 typedef struct {
     FrameV1Header header;
+    /* payload は入力 buf を借用する。buf の lifetime を超えて保持してはいけない。 */
     const uint8_t *payload;
     size_t payload_len;
     size_t frame_len;

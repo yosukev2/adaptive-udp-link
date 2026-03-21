@@ -88,6 +88,7 @@ typedef struct {
     uint64_t recv_any;
     uint64_t recv_ok;
     uint64_t bad_size;
+    uint64_t bad_header;
     uint64_t bad_crc;
     uint64_t poll_timeout;
     uint64_t gap_cnt;
@@ -306,7 +307,7 @@ static void write_summary(const RxFiles *files, const RxTotals *totals, uint64_t
         msg,
         sizeof(msg),
         "rx summary recv_any=%" PRIu64 " recv_ok=%" PRIu64
-        " bad_size=%" PRIu64 " bad_crc=%" PRIu64 " poll_timeout=%" PRIu64
+        " bad_size=%" PRIu64 " bad_header=%" PRIu64 " bad_crc=%" PRIu64 " poll_timeout=%" PRIu64
         " elapsed_ms=%" PRIu64 " avg_latency_ms=%.3f"
         " max_latency_ms=%" PRIu64 " min_latency_ms=%" PRIu64
         " gap_cnt=%" PRIu64 " dup_cnt=%" PRIu64 " reord_cnt=%" PRIu64
@@ -314,6 +315,7 @@ static void write_summary(const RxFiles *files, const RxTotals *totals, uint64_t
         totals->recv_any,
         totals->recv_ok,
         totals->bad_size,
+        totals->bad_header,
         totals->bad_crc,
         totals->poll_timeout,
         elapsed_ns / UINT64_C(1000000),
@@ -503,7 +505,7 @@ static int handle_received_frame(
             log_bad_frame_size(log_fp, msg, msg_size, (ssize_t)recv_len);
             return -1;
         case RX_FRAME_BAD_HEADER:
-            totals->bad_size++;
+            totals->bad_header++;
             log_bad_frame_header(log_fp, msg, msg_size, parsed);
             return -1;
         case RX_FRAME_BAD_CRC:

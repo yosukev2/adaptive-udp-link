@@ -27,8 +27,11 @@ static const uint8_t kFrameV1Crc32TestPayload[] = "crc32-test-payload";
 static uint32_t g_crc32_table[CRC32_TABLE_ENTRY_COUNT];
 static int g_crc32_table_initialized = 0;
 
+_Static_assert(FRAME_V1_PAYLOAD_MAX_BYTES <= UINT16_MAX,
+               "FRAME_V1 payload length must fit in uint16_t");
+
 static int validate_payload_args(const uint8_t *payload, size_t payload_len) {
-    if (payload_len > FRAME_V1_PAYLOAD_MAX_BYTES || payload_len > UINT16_MAX) {
+    if (payload_len > FRAME_V1_PAYLOAD_MAX_BYTES) {
         return -1;
     }
     if (payload_len > 0 && !payload) {
@@ -252,6 +255,7 @@ int frame_v1_validate_crc(
         return -1;
     }
 
+    /* 1=一致, 0=不一致, -1=入力/計算エラー */
     return (recalculated_crc == frame->crc32) ? 1 : 0;
 }
 
