@@ -59,8 +59,9 @@ typedef struct {
 } TxTotals;
 
 typedef struct {
-    struct timespec next_send;
-    uint64_t period_ns;
+    struct timespec next_send;  // 次回送信予定時刻（絶対時刻, CLOCK_MONOTONIC）
+    uint64_t period_ns;         // 基本送信周期 = 1_000_000_000 / rate_hz（端数切り捨て）
+                                // ループ内では remainder 補正後の this_period を使う
     uint64_t t_start_ns;
     uint64_t now_ns;
     uint64_t tx_ts_ns;
@@ -362,7 +363,14 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    // period_ns: 基本周期（端数切り捨て）
+    // period_remainder: 切り捨て分。rate_hz 回ぶん蓄積すると 1ns 余る。
+    // 例) rate_hz=7: period_ns=142857142, remainder=6
+    //   → 7 周期合計 = 142857142*1 + 142857143*6 = 999999999+1 = 1000000000 ✓
     ts.period_ns = 1000000000ULL / (uint64_t)cfg.rate_hz;
+    uint64_t period_remainder = 1000000000ULL % (uint64_t)cfg.rate_hz;
+    uint64_t remainder_acc = 0;
+
     if (now_monotonic_ns(&ts.t_start_ns) != 0) {
         perror("clock_gettime");
         close(sock);
@@ -383,10 +391,28 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    // 初回送信即時化:
+    //   next_send を 1 周期分だけ過去に設定しておく。
+    //   ループ先頭の timespec_add_ns で next_send += period となり、
+    //   clock_nanosleep は過去時刻 (≈ t_start) を目標とするため即時返る。
+    ts.next_send.tv_nsec -= (long)(ts.period_ns % 1000000000ULL);
+    ts.next_send.tv_sec  -= (long)(ts.period_ns / 1000000000ULL);
+    if (ts.next_send.tv_nsec < 0) {
+        ts.next_send.tv_nsec += 1000000000L;
+        ts.next_send.tv_sec--;
+    }
+
     while (ts.now_ns - ts.t_start_ns < (uint64_t)cfg.duration_sec * 1000000000ULL) {
         size_t frame_len = 0;
 
-        timespec_add_ns(&ts.next_send, ts.period_ns);
+        // remainder 補正: 端数を蓄積し rate_hz 回で +1ns して長期平均を合わせる
+        uint64_t this_period = ts.period_ns;
+        remainder_acc += period_remainder;
+        if (remainder_acc >= (uint64_t)cfg.rate_hz) {
+            this_period++;
+            remainder_acc -= (uint64_t)cfg.rate_hz;
+        }
+        timespec_add_ns(&ts.next_send, this_period);
         int sleep_err = clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts.next_send, NULL);
         if (sleep_err != 0 && sleep_err != EINTR) {
             errno = sleep_err;
