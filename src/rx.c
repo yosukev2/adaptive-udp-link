@@ -25,6 +25,7 @@
 //   - latency = recv_now(CLOCK_MONOTONIC) - frame.tx_ts
 //   - このlatencyは同一マシン/同一クロック系である前提で意味を持つ
 //   - UDPは順序保証がないため、seq差分ベースの欠損は「推定値」
+//   - seq wrap-around（uint32_t の周回）は未対応（docs/protocol.md §7 参照）
 #include <errno.h>
 #include <getopt.h>
 #include <stdio.h>
@@ -876,6 +877,7 @@ int main(int argc, char **argv) {
                 win->recv_ok++;
             }
         }
+
 
         if (now_monotonic_ns(&ts.now_for_stats_ns) != 0) {
             write_log_line(files.log_fp, "ERROR", "clock_gettime failed");

@@ -16,7 +16,7 @@ Frame v1 は以下の順序で並ぶ。
 |-------:|-----:|-------------|-------------|
 | 0      | 4    | preamble    | フレーム開始識別子（固定値） |
 | 4      | 1    | version     | プロトコルバージョン |
-| 5      | 1    | header_len  | CRCを含む、payload以外のヘッダ長（byte）、|
+| 5      | 1    | header_len  | payload を除くヘッダ全体の長さ（byte）。crc32 を含む。 |
 | 6      | 2    | payload_len | このフレームに含まれる payload の実長（byte） |
 | 8      | 4    | seq         | 送信順序番号 |
 | 12     | 8    | tx_ts       | 送信時刻（ns, CLOCK_MONOTONIC 基準） |
@@ -31,32 +31,83 @@ Frame v1 は以下の順序で並ぶ。
 - payload_len の上限 = 1024
 - flags の未使用ビットは 0 とする
 
-## 5. CRC32 の計算対象
-crc32 は、以下のバイト列を対象に計算した 32-bit CRC の値である。
+## 5. CRC32 の計算対象と算法
 
-計算対象:
-- version
-- header_len
-- payload_len
-- seq
-- tx_ts
-- flags
-- payload
+### 計算対象フィールド（この順序で連結したバイト列に対して計算する）
+
+| Field       | Size |
+|-------------|-----:|
+| version     | 1    |
+| header_len  | 1    |
+| payload_len | 2    |
+| seq         | 4    |
+| tx_ts       | 8    |
+| flags       | 1    |
+| payload     | N    |
 
 計算対象外:
-- preamble
-- crc32
+- preamble（再同期用であり CRC で保護しない）
+- crc32 自体
 
+固定部の合計 = 1+1+2+4+8+1 = **17 バイト**
+
+### CRC32 算法
+
+| 項目 | 値 |
+|------|---|
+| 規格 | CRC-32/ISO-HDLC（IEEE 802.3 互換） |
+| 多項式（reflected） | 0xEDB88320 |
+| 初期値 | 0xFFFFFFFF |
+| 最終 XOR | 0xFFFFFFFF |
+| ビット順 | LSB-first（reflected） |
+
+テストベクタ（`src/frame_v1_wire.c` の `kFrameV1Crc32TestExpected`）:
+- payload = `"crc32-test-payload"` (18 bytes)
+- seq = 0x01020304, tx_ts = 0x1122334455667788, flags = 0
+- 期待 CRC32 = **0x2D3B0C55**
 
 ## 6. 正しいフレームとみなす条件
 受信側は、候補フレームについて以下をすべて満たしたときのみ「正しいフレーム」とみなす。
-flagsは判定に用いない。
+flags は判定に用いない。
 
 1. preamble が一致する
 2. version == 1
 3. header_len == 25
 4. payload_len <= 1024
-5. header_len + payload_len = 28 + payloadのバイト数
+5. wire 上のバイト数 = header_len + payload_len = **25 + payload_len**
 6. CRC32 が一致する
 
+## 7. 未対応事項（現時点）
 
+以下は意図的に未実装。将来の Issue で対応する。
+
+| 事項 | 状態 | 備考 |
+|------|------|------|
+| seq wrap-around | **未対応** | seq は uint32_t。2^32 周回時の連続性判定は行わない。欠損・重複カウントが誤る可能性がある。 |
+| ACK / NACK / 再送 | 未実装 | UDP one-way 計測のみ |
+| 複数ストリーム管理 | 未実装 | 単一ソケット前提 |
+
+## 8. datagram と frame の関係（現時点の前提）
+
+UDP の 1 datagram と FrameV1 frame の対応は実装段階によって変わる。
+
+| フェーズ | 送信側 | 受信側 |
+|---------|--------|--------|
+| 現在（W02 #22 まで） | 1 datagram = 1 frame | 1 datagram = 1 frame として parse |
+| 予定（W02 #40） | 1 datagram = **3 frame** を連結 | datagram を byte 列として扱い、複数 frame を切り出す |
+
+受信側は datagram 内で preamble を再探索（resync）し、破損 frame の次の正常 frame から復帰できることを目標とする。
+
+## 9. 受信ループの統計カウンタ
+
+| カウンタ | 意味 |
+|---------|------|
+| recv_any | recvfrom() が成功した回数（不正フレームを含む） |
+| recv_ok | parse / validate / CRC がすべて成功したフレーム数 |
+| bad_size | payload_len 超過または parse 失敗の回数 |
+| bad_header | preamble / version / header_len 不正の回数 |
+| bad_crc | CRC32 不一致の回数 |
+| poll_timeout | poll() がタイムアウトした回数。1 秒周期の統計出力トリガーでもある。受信が途切れた秒数の目安になる。 |
+| gap_cnt | seq の不連続から推定した欠落フレーム数（UDP 順序保証なしのため「推定値」） |
+| dup_cnt | 同一 seq を持つフレームを受信した回数 |
+| reord_cnt | seq が前回より小さいフレームを受信した回数（逆順到着の推定） |
