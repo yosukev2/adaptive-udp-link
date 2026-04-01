@@ -387,7 +387,13 @@ int main(int argc, char **argv) {
         size_t frame_len = 0;
 
         timespec_add_ns(&ts.next_send, ts.period_ns);
-        clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts.next_send, NULL);
+        int sleep_err = clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts.next_send, NULL);
+        if (sleep_err != 0 && sleep_err != EINTR) {
+            errno = sleep_err;
+            perror("clock_nanosleep");
+            write_log_line(files.log_fp, "ERROR", "clock_nanosleep failed");
+            break;
+        }
 
         if (now_monotonic_ns(&ts.now_ns) != 0) {
             write_log_line(files.log_fp, "ERROR", "clock_gettime failed");

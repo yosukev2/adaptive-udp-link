@@ -454,6 +454,7 @@ static void write_per_recv_csv(const RxFiles *files, const RxTimingState *ts, ui
             ts->recv_now_ns, seq_value, tx_ts_ns, ts->latency, ts->gap
             );
         fprintf(files->csv_by_1recv_fp, "%s", msg_csv_by_1recv);
+        fflush(files->csv_by_1recv_fp);
     }
 }
 
@@ -644,6 +645,7 @@ static void write_log_per_1sec(const RxFiles *files, RxTimingState *ts, WindowSt
             ts->elapsed_sec, (double)ts->avg_latency_ns_in_1sec/1000000.0, (double)win->max_latency_ns/1000000.0,
             (double)win->min_latency_ns/1000000.0, win->recv_any, win->recv_ok, win->gap_cnt, win->dup_cnt, win->reord_cnt);
         fprintf(files->csv_in_1sec_fp, "%s", msg);
+        fflush(files->csv_in_1sec_fp);
     } else {
         snprintf(msg, sizeof(msg),
             "rx_stats elapsed_sec=%" PRIu64
