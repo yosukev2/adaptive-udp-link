@@ -225,7 +225,8 @@ static void write_summary(const TxFiles *files, const TxTotals *totals, uint64_t
     }
 
     if (elapsed_ns > 0) {
-        avg_rate = (double)totals->sent / ((double)elapsed_ns / 1e9);
+        // avg_rate_hz はフレームレート（frame/s）。totals->seq がフレーム総数。
+        avg_rate = (double)totals->seq / ((double)elapsed_ns / 1e9);
     }
 
     snprintf(
@@ -366,12 +367,14 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    // period_ns: 基本周期（端数切り捨て）
-    // period_remainder: 切り捨て分。rate_hz 回ぶん蓄積すると 1ns 余る。
-    // 例) rate_hz=7: period_ns=142857142, remainder=6
-    //   → 7 周期合計 = 142857142*1 + 142857143*6 = 999999999+1 = 1000000000 ✓
-    ts.period_ns = 1000000000ULL / (uint64_t)cfg.rate_hz;
-    uint64_t period_remainder = 1000000000ULL % (uint64_t)cfg.rate_hz;
+    // --rate-hz はフレームレート（frame/s）として扱う。
+    // 1 datagram に TX_FRAMES_PER_DATAGRAM フレームを含むため、
+    // datagram 送信周期 = (1s * TX_FRAMES_PER_DATAGRAM) / rate_hz となる。
+    // 例) rate_hz=100, TX_FRAMES_PER_DATAGRAM=3:
+    //   period_ns = 3000000000/100 = 30000000 ns (30 ms)
+    //   → 33.3 datagram/s × 3 frame = 100 frame/s ✓
+    ts.period_ns = (1000000000ULL * (uint64_t)TX_FRAMES_PER_DATAGRAM) / (uint64_t)cfg.rate_hz;
+    uint64_t period_remainder = (1000000000ULL * (uint64_t)TX_FRAMES_PER_DATAGRAM) % (uint64_t)cfg.rate_hz;
     uint64_t remainder_acc = 0;
 
     if (now_monotonic_ns(&ts.t_start_ns) != 0) {
