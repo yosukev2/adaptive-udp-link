@@ -87,16 +87,14 @@ flags は判定に用いない。
 | ACK / NACK / 再送 | 未実装 | UDP one-way 計測のみ |
 | 複数ストリーム管理 | 未実装 | 単一ソケット前提 |
 
-## 8. datagram と frame の関係（現時点の前提）
+## 8. datagram と frame の関係
 
-UDP の 1 datagram と FrameV1 frame の対応は実装段階によって変わる。
+1 UDP datagram に **3 frame** を連結して送信する（W02 #40 実装済み）。
 
-| フェーズ | 送信側 | 受信側 |
-|---------|--------|--------|
-| 現在（W02 #22 まで） | 1 datagram = 1 frame | 1 datagram = 1 frame として parse |
-| 予定（W02 #40） | 1 datagram = **3 frame** を連結 | datagram を byte 列として扱い、複数 frame を切り出す |
+- 送信側（tx）: `TX_FRAMES_PER_DATAGRAM=3` frame を 1 回の `sendto` で送信する
+- 受信側（rx）: datagram を byte 列としてストリームバッファに積み、preamble 探索で複数 frame を順次切り出す
 
-受信側は datagram 内で preamble を再探索（resync）し、破損 frame の次の正常 frame から復帰できることを目標とする。
+受信側は datagram 内で preamble を再探索（resync）し、破損 frame の次の正常 frame から復帰できる。
 
 ## 9. 受信ループの統計カウンタ
 
@@ -111,3 +109,21 @@ UDP の 1 datagram と FrameV1 frame の対応は実装段階によって変わ�
 | gap_cnt | seq の不連続から推定した欠落フレーム数（UDP 順序保証なしのため「推定値」） |
 | dup_cnt | 同一 seq を持つフレームを受信した回数 |
 | reord_cnt | seq が前回より小さいフレームを受信した回数（逆順到着の推定） |
+
+## 10. 設計判断
+
+### preamble 長（4 bytes）
+
+2 bytes だと一致確率が高く、データ中に偶然同じ値が頻繁に現れて誤検出するため、4 bytes を選択した。
+
+### preamble 値（0xA55AC33C）
+
+0 と 1 が偏らず単純すぎないビット列にすることで、検出しやすく誤一致しにくくするため、この値を選択した。
+
+### payload 長の上限（1024 bytes）
+
+1500 bytes を超えると IP で分割され、一部欠損で全体ロストや遅延増加が起きて挙動が不安定になるため、Ethernet MTU（1500 bytes）に収まる上限として 1024 bytes を選択した。
+
+### CRC の適用範囲（preamble を除外）
+
+preamble は境界検出用、CRC は内容検証用であり、役割を分けるため preamble を CRC の計算対象に含めない。
