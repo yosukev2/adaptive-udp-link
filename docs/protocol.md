@@ -87,16 +87,14 @@ flags は判定に用いない。
 | ACK / NACK / 再送 | 未実装 | UDP one-way 計測のみ |
 | 複数ストリーム管理 | 未実装 | 単一ソケット前提 |
 
-## 8. datagram と frame の関係（現時点の前提）
+## 8. datagram と frame の関係
 
-UDP の 1 datagram と FrameV1 frame の対応は実装段階によって変わる。
+1 UDP datagram に **3 frame** を連結して送信する（W02 #40 実装済み）。
 
-| フェーズ | 送信側 | 受信側 |
-|---------|--------|--------|
-| 現在（W02 #22 まで） | 1 datagram = 1 frame | 1 datagram = 1 frame として parse |
-| 予定（W02 #40） | 1 datagram = **3 frame** を連結 | datagram を byte 列として扱い、複数 frame を切り出す |
+- 送信側（tx）: `TX_FRAMES_PER_DATAGRAM=3` frame を 1 回の `sendto` で送信する
+- 受信側（rx）: datagram を byte 列としてストリームバッファに積み、preamble 探索で複数 frame を順次切り出す
 
-受信側は datagram 内で preamble を再探索（resync）し、破損 frame の次の正常 frame から復帰できることを目標とする。
+受信側は datagram 内で preamble を再探索（resync）し、破損 frame の次の正常 frame から復帰できる。
 
 ## 9. 受信ループの統計カウンタ
 
