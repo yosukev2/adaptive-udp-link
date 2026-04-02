@@ -38,6 +38,9 @@
 
 #include "frame_v1_wire.h"
 
+// 1 UDP datagram に連結して送信する frame 数
+#define TX_FRAMES_PER_DATAGRAM 3
+
 typedef struct {
     const char *dst_ip;    // 送信先IP（例: "127.0.0.1"）
     int dst_port;          // 送信先ポート
@@ -306,7 +309,7 @@ int main(int argc, char **argv) {
     TxTimingState ts = {0};
     FrameV1Header frame = {0};
     uint8_t payload[FRAME_V1_PAYLOAD_MAX_BYTES] = {0};
-    uint8_t frame_bytes[FRAME_V1_MAX_WIRE_BYTES] = {0};
+    uint8_t datagram_buf[TX_FRAMES_PER_DATAGRAM * FRAME_V1_MAX_WIRE_BYTES];
     int logged_first_frame = 0;
 
     if (parse_args(argc, argv, &cfg) != 0) {
@@ -403,8 +406,6 @@ int main(int argc, char **argv) {
     }
 
     while (ts.now_ns - ts.t_start_ns < (uint64_t)cfg.duration_sec * 1000000000ULL) {
-        size_t frame_len = 0;
-
         // remainder 補正: 端数を蓄積し rate_hz 回で +1ns して長期平均を合わせる
         uint64_t this_period = ts.period_ns;
         remainder_acc += period_remainder;
@@ -426,45 +427,55 @@ int main(int argc, char **argv) {
             break;
         }
 
-        memset(&frame, 0, sizeof(frame));
-        memset(frame_bytes, 0, sizeof(frame_bytes));
         if (now_monotonic_ns(&ts.tx_ts_ns) != 0) {
             write_log_line(files.log_fp, "ERROR", "clock_gettime failed before send");
             break;
         }
 
-        frame.seq = totals.seq;
-        frame.tx_ts = ts.tx_ts_ns;
-        frame.flags = kFrameV1FlagsNone;
-        if (frame_v1_build(&frame, payload, (size_t)cfg.payload_len, frame_bytes, sizeof(frame_bytes), &frame_len) != 0) {
-            write_log_line(files.log_fp, "ERROR", "frame_v1_build failed");
-            break;
+        // TX_FRAMES_PER_DATAGRAM 個のフレームを datagram_buf に連結してから 1 回の sendto で送る
+        size_t datagram_len = 0;
+        int build_ok = 1;
+        for (int fi = 0; fi < TX_FRAMES_PER_DATAGRAM && build_ok; fi++) {
+            size_t one_frame_len = 0;
+            memset(&frame, 0, sizeof(frame));
+            frame.seq   = totals.seq + (uint32_t)fi;
+            frame.tx_ts = ts.tx_ts_ns;
+            frame.flags = kFrameV1FlagsNone;
+            uint8_t *dst = datagram_buf + datagram_len;
+            size_t   cap = sizeof(datagram_buf) - datagram_len;
+            if (frame_v1_build(&frame, payload, (size_t)cfg.payload_len, dst, cap, &one_frame_len) != 0) {
+                write_log_line(files.log_fp, "ERROR", "frame_v1_build failed");
+                build_ok = 0;
+                break;
+            }
+            if (!logged_first_frame && files.log_fp) {
+                snprintf(buf, sizeof(buf),
+                         "frame_v1 first_frame version=%u payload_len=%u seq=%" PRIu32 " crc32=0x%08" PRIX32 " frame_len=%zu",
+                         frame.version,
+                         frame.payload_len,
+                         frame.seq,
+                         frame.crc32,
+                         one_frame_len);
+                write_log_line(files.log_fp, "INFO", buf);
+                logged_first_frame = 1;
+            }
+            datagram_len += one_frame_len;
         }
-        if (!logged_first_frame && files.log_fp) {
-            snprintf(buf, sizeof(buf),
-                     "frame_v1 first_frame version=%u payload_len=%u seq=%" PRIu32 " crc32=0x%08" PRIX32 " frame_len=%zu",
-                     frame.version,
-                     frame.payload_len,
-                     frame.seq,
-                     frame.crc32,
-                     frame_len);
-            write_log_line(files.log_fp, "INFO", buf);
-            logged_first_frame = 1;
-        }
+        if (!build_ok) break;
 
-        ssize_t sent = sendto(sock, frame_bytes, frame_len, 0, (struct sockaddr *)&dest, sizeof(dest));
+        ssize_t sent = sendto(sock, datagram_buf, datagram_len, 0, (struct sockaddr *)&dest, sizeof(dest));
         if (sent < 0) {
             perror("sendto");
             write_log_line(files.log_fp, "ERROR", "sendto failed");
             break;
         }
 
-        if ((size_t)sent != frame_len) {
+        if ((size_t)sent != datagram_len) {
             write_log_line(files.log_fp, "ERROR", "sendto returned unexpected size");
             break;
         }
 
-        totals.seq++;
+        totals.seq += TX_FRAMES_PER_DATAGRAM;
         totals.sent++;
     }
 
