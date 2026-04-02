@@ -37,11 +37,12 @@ SRC_DIR := src
 # 「最終的に何ができるか」が見えやすいよう変数化している
 TX := $(BIN_DIR)/tx
 RX := $(BIN_DIR)/rx
+TEST_FRAMER := $(BIN_DIR)/test_framer
 FRAME_V1_WIRE := $(SRC_DIR)/frame_v1_wire.c
 
 # .PHONY は「同名のファイルが存在しても、これはファイルではなくコマンド名として扱う」
 # 例: clean という名前のファイルが偶然あっても、make clean が壊れない
-.PHONY: all clean run10 run60
+.PHONY: all clean run10 run60 test
 
 # デフォルトターゲット（make とだけ打つと all が実行される）
 # #2のAC「ワンコマンドでビルド」を満たすため、allで tx/rx 両方を作る
@@ -70,6 +71,14 @@ $(TX): $(SRC_DIR)/tx.c $(FRAME_V1_WIRE) | $(BIN_DIR)
 # rx をビルドするルール（txと同じ考え方）
 $(RX): $(SRC_DIR)/rx.c $(FRAME_V1_WIRE) | $(BIN_DIR)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+# Framer ユニットテストのビルドルール
+$(TEST_FRAMER): $(SRC_DIR)/test_framer.c $(FRAME_V1_WIRE) | $(BIN_DIR)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+# テスト実行（ビルド→実行）
+test: $(TEST_FRAMER)
+	$(TEST_FRAMER)
 
 # 10秒実行のショートカット
 # 「make run10」で、ビルド→実行スクリプトの順に動く
