@@ -759,7 +759,9 @@ int main(int argc, char **argv) {
 
     FrameV1Parsed parsed = {0};
     RxStreamBuf stream_buf = {0};
-    uint8_t buf_udp[FRAME_V1_MAX_WIRE_BYTES];
+    // tx が複数フレームを連結して送信するため、1 datagram は最大 stream_buf 容量まで許容する。
+    // FRAME_V1_MAX_WIRE_BYTES だと 3 フレーム分で truncate が発生するため RX_STREAM_BUF_CAP を使う。
+    uint8_t buf_udp[RX_STREAM_BUF_CAP];
 
     char msg[256];
     ssize_t n = 0;
