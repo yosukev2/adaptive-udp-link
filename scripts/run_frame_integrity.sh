@@ -95,10 +95,13 @@ for ci in "${!FAULT_RATES[@]}"; do
         echo "[INFO] trial=${trial} run_dir=${RUN_DIR}"
 
         # rx をバックグラウンドで起動
+        # duration-sec を TX より 2 秒長くする理由:
+        #   sleep 1 の間も RX のタイマーが進むため、RX を TX と同じ duration にすると
+        #   最後の ~1 秒分（約 100 frame）を取りこぼす。+2 で全量を確実に捕捉する。
         ./bin/rx \
             --bind-ip "$BIND_IP" \
             --port "$PORT" \
-            --duration-sec "$DURATION_SEC" \
+            --duration-sec $(( DURATION_SEC + 2 )) \
             --log-path "$RX_LOG" &
         RX_PID=$!
         sleep 1

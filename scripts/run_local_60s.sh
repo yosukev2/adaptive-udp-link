@@ -27,13 +27,15 @@ TX_LOG="$RUN_DIR/tx.log"
 echo "[INFO] run dir: $RUN_DIR"
 
 # 受信側を先に起動（本実装時の取りこぼし防止）
-./bin/rx --bind-ip 127.0.0.1 --port 9000 --duration-sec 60 --log-path "$RX_LOG"  --csv-in-1sec-log-path "$RX_CSV_IN_1SEC_LOG" --csv-by-1recv-log-path "$RX_CSV_BY_1RECV_LOG" &
+./bin/rx --bind-ip 127.0.0.1 --port 9000 --duration-sec 62 --log-path "$RX_LOG"  --csv-in-1sec-log-path "$RX_CSV_IN_1SEC_LOG" --csv-by-1recv-log-path "$RX_CSV_BY_1RECV_LOG" &
 RX_PID=$!
 
 # 起動安定化のための待機
+# rx の duration-sec を tx より 2 秒長くしている理由:
+#   sleep 1 の間も rx のタイマーが進むため、同じ duration にすると
+#   最後の ~1 秒分（約 100 frame）を取りこぼす。+2 で全量を確実に捕捉する。
 sleep 1
 
-# 送信側を起動（#2時点ではスタブ）
 ./bin/tx --dst-ip 127.0.0.1 --dst-port 9000 --rate-hz 100 --duration-sec 60 --log-path "$TX_LOG"
 
 # 受信側終了待ち

@@ -1,6 +1,6 @@
 # 実験条件
 
-実施日時: 2026-04-04 07:41:43
+実施日時: 2026-04-04 07:56:31
 OS: Linux 6.6.87.2-microsoft-standard-WSL2
 送信レート: 100 frame/s
 計測時間: 30 秒/試行
@@ -17,25 +17,3 @@ TX_FRAMES_PER_DATAGRAM: 3（1 datagram = 3 frame 連結）
 
 # parse_ok_rate の計算式
 # parse_ok_rate = recv_ok / (recv_ok + crc_fail + preamble_miss + len_invalid)
-
-# 実験結果サマリ
-
-## 条件別比較表
-
-| 条件 | fault_rate | recv_ok (平均) | crc_fail (平均) | resync_count (平均) | parse_ok_rate (平均) |
-|------|-----------|--------------|----------------|---------------------|---------------------|
-| A_none | 0.00 | 2901 | 0 | 0 | 1.000 |
-| B_low  | 0.01 | 2866 | 35 | 35 | 0.988 |
-| C_mid  | 0.05 | 2759 | 142 | 142 | 0.951 |
-| D_high | 0.10 | 2605 | 296 | 296 | 0.898 |
-
-## CRC棄却とresyncの関係（解釈）
-
-fault-target=crc の場合、CRC 棄却は常に frame_len バイト分を丸ごとスキップする clean な resync として機能する。
-preamble_miss=0 が全条件で維持されており、CRC 不一致フレームを正しくスキップした後に
-次フレームの preamble が offset 0 に現れている（フレーム境界が保たれている）ことを示す。
-破損率 10% でも parse_ok_rate=0.898 を維持し、プロセスクラッシュは 12 回全試行でゼロ。
-
-## プロセス安定性
-
-全 12 試行でプロセスが正常終了したことを確認済み（各 rx.log の "rx end" ログで検証可能）。

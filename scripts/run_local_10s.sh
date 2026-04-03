@@ -51,7 +51,7 @@ echo "[INFO] run dir: $RUN_DIR"
 #   本実装になった時、先にtxを起動すると最初のパケットを取りこぼしやすい。
 #
 # "&" を付けるとバックグラウンド実行になる。
-./bin/rx --bind-ip 127.0.0.1 --port 9000 --duration-sec 10 --log-path "$RX_LOG"  --csv-in-1sec-log-path "$RX_CSV_IN_1SEC_LOG" --csv-by-1recv-log-path "$RX_CSV_BY_1RECV_LOG" &
+./bin/rx --bind-ip 127.0.0.1 --port 9000 --duration-sec 12 --log-path "$RX_LOG"  --csv-in-1sec-log-path "$RX_CSV_IN_1SEC_LOG" --csv-by-1recv-log-path "$RX_CSV_BY_1RECV_LOG" &
 RX_PID=$!
 
 # $! は「直前に起動したバックグラウンドプロセスのPID」
@@ -60,6 +60,10 @@ RX_PID=$!
 #
 # ここで少し待つ理由:
 #   rx起動直後にtxを開始すると、本実装時に起動競合しやすい。
+#
+# rx の duration-sec を tx より 2 秒長くしている理由:
+#   sleep 1 の間も rx のタイマーが進むため、同じ duration にすると
+#   最後の ~1 秒分（約 100 frame）を取りこぼす。+2 で全量を確実に捕捉する。
 sleep 1
 
 # tx をフォアグラウンドで起動
