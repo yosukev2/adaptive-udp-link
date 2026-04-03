@@ -96,6 +96,7 @@ typedef struct {
     uint64_t bad_header;
     uint64_t bad_crc;
     uint64_t resync_count;   // PREAMBLE_MISS / LEN_INVALID / CRC_FAIL で再探索した回数
+    uint64_t preamble_miss;  // preamble が先頭にないと判定された回数（FRAMER_RESYNCED のみ）
     uint64_t len_invalid;    // payload_len が上限超えのフレーム数（LEN_INVALID）
     uint64_t poll_timeout;
     uint64_t gap_cnt;
@@ -322,7 +323,8 @@ static void write_summary(const RxFiles *files, const RxTotals *totals, uint64_t
         sizeof(msg),
         "rx summary recv_any=%" PRIu64 " recv_ok=%" PRIu64
         " bad_size=%" PRIu64 " bad_header=%" PRIu64 " bad_crc=%" PRIu64
-        " resync_count=%" PRIu64 " crc_fail=%" PRIu64 " len_invalid=%" PRIu64
+        " resync_count=%" PRIu64 " preamble_miss=%" PRIu64
+        " crc_fail=%" PRIu64 " len_invalid=%" PRIu64
         " poll_timeout=%" PRIu64
         " elapsed_ms=%" PRIu64 " avg_latency_ms=%.3f"
         " max_latency_ms=%" PRIu64 " min_latency_ms=%" PRIu64
@@ -334,6 +336,7 @@ static void write_summary(const RxFiles *files, const RxTotals *totals, uint64_t
         totals->bad_header,
         totals->bad_crc,
         totals->resync_count,
+        totals->preamble_miss,
         totals->bad_crc,      // crc_fail = bad_crc の別名
         totals->len_invalid,
         totals->poll_timeout,
@@ -564,6 +567,7 @@ static FramerResult rx_framer_step(
     if (preamble_off > 0) {
         // preamble が先頭にない: ゴミをスキップ (PREAMBLE_MISS)
         totals->resync_count++;
+        totals->preamble_miss++;
         totals->bad_size += preamble_off;
         rx_buf_consume(buf, preamble_off);
         *out_event_type = "PREAMBLE_MISS";
