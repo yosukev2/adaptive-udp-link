@@ -41,15 +41,27 @@
 // 1 UDP datagram に連結して送信する frame 数
 #define TX_FRAMES_PER_DATAGRAM 3
 
+// 故障注入の対象フィールド
+typedef enum {
+    FAULT_NONE        = 0,
+    FAULT_PREAMBLE    = 1,  // preamble (bytes 0-3) の任意 1bit を反転 → PREAMBLE_MISS
+    FAULT_PAYLOAD_LEN = 2,  // payload_len を上限超えの値に書き換え → LEN_INVALID
+    FAULT_CRC         = 3,  // crc32 フィールド (bytes 21-24) の任意 1bit を反転 → CRC_FAIL
+    FAULT_PAYLOAD     = 4,  // payload の任意 1bit を反転 → CRC_FAIL
+    FAULT_HEADER      = 5,  // version または header_len を不正値に書き換え → HEADER_INVALID
+} FaultTarget;
+
 typedef struct {
-    const char *dst_ip;    // 送信先IP（例: "127.0.0.1"）
-    int dst_port;          // 送信先ポート
-    int rate_hz;           // 送信レート（Hz）
-    int duration_sec;      // 実行時間
-    const char *log_path;  // ログファイルパス
-    int payload_len;       // 送信する payload 長（byte）
-    int version;           // プロトコルバージョン（現状は v1 固定）
-    int crc32_test_mode;   // ハードコードした v1 フレームで CRC32 を確認する
+    const char *dst_ip;         // 送信先IP（例: "127.0.0.1"）
+    int dst_port;               // 送信先ポート
+    int rate_hz;                // 送信レート（Hz）
+    int duration_sec;           // 実行時間
+    const char *log_path;       // ログファイルパス
+    int payload_len;            // 送信する payload 長（byte）
+    int version;                // プロトコルバージョン（現状は v1 固定）
+    int crc32_test_mode;        // ハードコードした v1 フレームで CRC32 を確認する
+    FaultTarget fault_target;   // 故障注入の対象フィールド（FAULT_NONE = 無効）
+    float fault_rate;           // 故障注入確率（0.0〜1.0）
 } TxConfig;
 
 typedef struct {
@@ -72,7 +84,9 @@ typedef struct {
 
 static void print_usage(const char *prog) {
     fprintf(stderr,
-            "Usage: %s --dst-ip <ip> --dst-port <port> --rate-hz <hz> --duration-sec <sec> --log-path <path> [--payload-len <n>] [--version <n>] [--crc32-test]\n",
+            "Usage: %s --dst-ip <ip> --dst-port <port> --rate-hz <hz> --duration-sec <sec>"
+            " --log-path <path> [--payload-len <n>] [--version <n>] [--crc32-test]"
+            " [--fault-target preamble|payload_len|crc|payload|header] [--fault-rate 0.0-1.0]\n",
             prog);
 }
 
@@ -83,6 +97,16 @@ static int parse_int(const char *s, int *out) {
     if (errno != 0 || end == s || *end != '\0') return -1;
     if (v < -2147483648L || v > 2147483647L) return -1;
     *out = (int)v;
+    return 0;
+}
+
+static int parse_float(const char *s, float *out) {
+    char *end = NULL;
+    errno = 0;
+    double v = strtod(s, &end);
+    if (errno != 0 || end == s || *end != '\0') return -1;
+    if (v < 0.0 || v > 1.0) return -1;
+    *out = (float)v;
     return 0;
 }
 
@@ -100,8 +124,10 @@ static int parse_args(int argc, char **argv, TxConfig *cfg) {
         {"duration-sec", required_argument, 0, 4},
         {"log-path", required_argument, 0, 5},
         {"version", required_argument, 0, 6},
-        {"crc32-test", no_argument, 0, 7},
-        {"payload-len", required_argument, 0, 8},
+        {"crc32-test",    no_argument,       0, 7},
+        {"payload-len",   required_argument, 0, 8},
+        {"fault-target",  required_argument, 0, 9},
+        {"fault-rate",    required_argument, 0, 10},
         {0, 0, 0, 0}
     };
 
@@ -151,6 +177,30 @@ static int parse_args(int argc, char **argv, TxConfig *cfg) {
             case 8:
                 if (parse_int(optarg, &cfg->payload_len) != 0) {
                     fprintf(stderr, "Invalid --payload-len: %s\n", optarg);
+                    print_usage(argv[0]);
+                    return -1;
+                }
+                break;
+            case 9:
+                if (strcmp(optarg, "preamble") == 0) {
+                    cfg->fault_target = FAULT_PREAMBLE;
+                } else if (strcmp(optarg, "payload_len") == 0) {
+                    cfg->fault_target = FAULT_PAYLOAD_LEN;
+                } else if (strcmp(optarg, "crc") == 0) {
+                    cfg->fault_target = FAULT_CRC;
+                } else if (strcmp(optarg, "payload") == 0) {
+                    cfg->fault_target = FAULT_PAYLOAD;
+                } else if (strcmp(optarg, "header") == 0) {
+                    cfg->fault_target = FAULT_HEADER;
+                } else {
+                    fprintf(stderr, "Invalid --fault-target: %s (expected preamble|payload_len|crc|payload|header)\n", optarg);
+                    print_usage(argv[0]);
+                    return -1;
+                }
+                break;
+            case 10:
+                if (parse_float(optarg, &cfg->fault_rate) != 0) {
+                    fprintf(stderr, "Invalid --fault-rate: %s (expected 0.0-1.0)\n", optarg);
                     print_usage(argv[0]);
                     return -1;
                 }
@@ -214,6 +264,106 @@ static void write_log_line(FILE *fp, const char *level, const char *msg) {
     strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tmv);
     fprintf(fp, "%s [%s] %s\n", ts, level, msg);
     fflush(fp);
+}
+
+static const char *fault_target_name(FaultTarget t) {
+    switch (t) {
+        case FAULT_PREAMBLE:    return "preamble";
+        case FAULT_PAYLOAD_LEN: return "payload_len";
+        case FAULT_CRC:         return "crc";
+        case FAULT_PAYLOAD:     return "payload";
+        case FAULT_HEADER:      return "header";
+        default:                return "none";
+    }
+}
+
+// 故障注入: frame_v1_build() 後の wire バイト列に対して target フィールドを破壊する。
+// 確率 rate で注入し、実施した場合はログに記録する。
+static void apply_fault_injection(
+    FaultTarget target,
+    float rate,
+    uint8_t *frame_buf,
+    size_t frame_len,
+    size_t payload_len,
+    uint32_t seq,
+    FILE *log_fp
+) {
+    // 確率判定
+    float r = (float)rand() / ((float)RAND_MAX + 1.0f);
+    if (r >= rate) {
+        return;
+    }
+
+    char msg[128];
+
+    switch (target) {
+        case FAULT_PREAMBLE: {
+            // preamble (bytes 0-3) の任意 1bit を反転
+            int byte_off = rand() % 4;
+            int bit_off  = rand() % 8;
+            frame_buf[byte_off] ^= (uint8_t)(1U << bit_off);
+            snprintf(msg, sizeof(msg),
+                     "seq=%" PRIu32 ": fault injected to preamble (byte=%d bit=%d)",
+                     seq, byte_off, bit_off);
+            break;
+        }
+        case FAULT_PAYLOAD_LEN: {
+            // payload_len を上限超えの値に書き換え
+            uint16_t bad_len = (uint16_t)(FRAME_V1_PAYLOAD_MAX_BYTES + 1);
+            frame_buf[FRAME_V1_PAYLOAD_LEN_OFFSET]     = (uint8_t)(bad_len >> 8);
+            frame_buf[FRAME_V1_PAYLOAD_LEN_OFFSET + 1] = (uint8_t)bad_len;
+            snprintf(msg, sizeof(msg),
+                     "seq=%" PRIu32 ": fault injected to payload_len (bad_len=%u)",
+                     seq, bad_len);
+            break;
+        }
+        case FAULT_CRC: {
+            // crc32 フィールド (bytes 21-24) の任意 1bit を反転
+            int byte_off = FRAME_V1_CRC32_OFFSET + rand() % 4;
+            int bit_off  = rand() % 8;
+            frame_buf[byte_off] ^= (uint8_t)(1U << bit_off);
+            snprintf(msg, sizeof(msg),
+                     "seq=%" PRIu32 ": fault injected to crc (byte=%d bit=%d)",
+                     seq, byte_off, bit_off);
+            break;
+        }
+        case FAULT_PAYLOAD: {
+            // payload_len=0 のときは注入不可
+            if (payload_len == 0) {
+                snprintf(msg, sizeof(msg),
+                         "seq=%" PRIu32 ": fault skip payload (payload_len=0)", seq);
+                write_log_line(log_fp, "WARN", msg);
+                return;
+            }
+            int byte_off = (int)(rand() % payload_len);
+            int bit_off  = rand() % 8;
+            frame_buf[FRAME_V1_WIRE_HEADER_LEN + (size_t)byte_off] ^= (uint8_t)(1U << bit_off);
+            snprintf(msg, sizeof(msg),
+                     "seq=%" PRIu32 ": fault injected to payload (byte=%d bit=%d)",
+                     seq, byte_off, bit_off);
+            break;
+        }
+        case FAULT_HEADER: {
+            // version または header_len をランダムに不正値に書き換え
+            if (rand() % 2 == 0) {
+                frame_buf[FRAME_V1_VERSION_OFFSET] = kFrameV1Version + 1U;
+                snprintf(msg, sizeof(msg),
+                         "seq=%" PRIu32 ": fault injected to header (version=%u)",
+                         seq, kFrameV1Version + 1U);
+            } else {
+                frame_buf[FRAME_V1_HEADER_LEN_OFFSET] = (uint8_t)(FRAME_V1_WIRE_HEADER_LEN + 1);
+                snprintf(msg, sizeof(msg),
+                         "seq=%" PRIu32 ": fault injected to header (header_len=%d)",
+                         seq, FRAME_V1_WIRE_HEADER_LEN + 1);
+            }
+            break;
+        }
+        default:
+            return;
+    }
+
+    write_log_line(log_fp, "INFO", msg);
+    (void)frame_len;  // 将来の範囲チェック拡張用
 }
 
 static void write_summary(const TxFiles *files, const TxTotals *totals, uint64_t elapsed_ns) {
@@ -321,6 +471,9 @@ int main(int argc, char **argv) {
         return run_crc32_test_mode();
     }
 
+    // 故障注入の乱数シードを初期化
+    srand((unsigned int)time(NULL));
+
     if (open_output_files(&cfg, &files) != 0) {
         return 1;
     }
@@ -341,6 +494,13 @@ int main(int argc, char **argv) {
                  "tx start dst=%s:%d rate_hz=%d duration_sec=%d payload_len=%d",
                  cfg.dst_ip, cfg.dst_port, cfg.rate_hz, cfg.duration_sec, cfg.payload_len);
         write_log_line(files.log_fp, "INFO", buf);
+
+        if (cfg.fault_target != FAULT_NONE) {
+            snprintf(buf, sizeof(buf),
+                     "fault injection enabled target=%s rate=%.2f",
+                     fault_target_name(cfg.fault_target), (double)cfg.fault_rate);
+            write_log_line(files.log_fp, "INFO", buf);
+        }
     }
 
     printf("tx started: dst=%s:%d rate_hz=%d duration=%d log=%s\n",
@@ -461,6 +621,18 @@ int main(int argc, char **argv) {
                          one_frame_len);
                 write_log_line(files.log_fp, "INFO", buf);
                 logged_first_frame = 1;
+            }
+            // 故障注入（frame_v1_build 後の wire バイト列を直接書き換える）
+            if (cfg.fault_target != FAULT_NONE) {
+                apply_fault_injection(
+                    cfg.fault_target,
+                    cfg.fault_rate,
+                    dst,
+                    one_frame_len,
+                    (size_t)cfg.payload_len,
+                    totals.seq + (uint32_t)fi,
+                    files.log_fp
+                );
             }
             datagram_len += one_frame_len;
         }
