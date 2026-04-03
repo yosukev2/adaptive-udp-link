@@ -96,6 +96,7 @@ typedef struct {
     uint64_t bad_header;
     uint64_t bad_crc;
     uint64_t resync_count;   // PREAMBLE_MISS / LEN_INVALID / CRC_FAIL で再探索した回数
+    uint64_t len_invalid;    // payload_len が上限超えのフレーム数（LEN_INVALID）
     uint64_t poll_timeout;
     uint64_t gap_cnt;
     uint64_t dup_cnt;
@@ -288,7 +289,7 @@ static int open_output_files(const RxConfig *config, RxFiles *files) {
             close_output_files(files);
             return -1;
         }
-        fprintf(files->csv_by_1recv_fp, "rcv_time_ns,seq,send_time_ns,latency_ns,missing_delta\n");
+        fprintf(files->csv_by_1recv_fp, "rcv_time_ns,seq,send_time_ns,latency_ns,missing_delta,parse_status\n");
         fflush(files->csv_by_1recv_fp);
     }
 
@@ -321,7 +322,8 @@ static void write_summary(const RxFiles *files, const RxTotals *totals, uint64_t
         sizeof(msg),
         "rx summary recv_any=%" PRIu64 " recv_ok=%" PRIu64
         " bad_size=%" PRIu64 " bad_header=%" PRIu64 " bad_crc=%" PRIu64
-        " resync_count=%" PRIu64 " poll_timeout=%" PRIu64
+        " resync_count=%" PRIu64 " crc_fail=%" PRIu64 " len_invalid=%" PRIu64
+        " poll_timeout=%" PRIu64
         " elapsed_ms=%" PRIu64 " avg_latency_ms=%.3f"
         " max_latency_ms=%" PRIu64 " min_latency_ms=%" PRIu64
         " gap_cnt=%" PRIu64 " dup_cnt=%" PRIu64 " reord_cnt=%" PRIu64
@@ -332,6 +334,8 @@ static void write_summary(const RxFiles *files, const RxTotals *totals, uint64_t
         totals->bad_header,
         totals->bad_crc,
         totals->resync_count,
+        totals->bad_crc,      // crc_fail = bad_crc の別名
+        totals->len_invalid,
         totals->poll_timeout,
         elapsed_ns / UINT64_C(1000000),
         (totals->latency_sample_cnt > 0)
@@ -451,10 +455,21 @@ static void write_per_recv_csv(const RxFiles *files, const RxTimingState *ts, ui
     char msg_csv_by_1recv[256];
     if (files->csv_by_1recv_fp) {
         snprintf(msg_csv_by_1recv, sizeof(msg_csv_by_1recv),
-            "%" PRIu64 ",%" PRIu32 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 "\n",
+            "%" PRIu64 ",%" PRIu32 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",OK\n",
             ts->recv_now_ns, seq_value, tx_ts_ns, ts->latency, ts->gap
             );
         fprintf(files->csv_by_1recv_fp, "%s", msg_csv_by_1recv);
+        fflush(files->csv_by_1recv_fp);
+    }
+}
+
+// 異常フレームのイベントを CSV に記録する。
+// seq / latency 等は不明なため 0 を出力し、parse_status に失敗種別を記録する。
+static void write_fault_csv(const RxFiles *files, uint64_t recv_now_ns, const char *parse_status) {
+    if (files->csv_by_1recv_fp) {
+        fprintf(files->csv_by_1recv_fp,
+                "%" PRIu64 ",0,0,0,0,%s\n",
+                recv_now_ns, parse_status);
         fflush(files->csv_by_1recv_fp);
     }
 }
@@ -527,7 +542,8 @@ static FramerResult rx_framer_step(
     RxTotals *totals,
     FILE *log_fp,
     char *msg,
-    size_t msg_size
+    size_t msg_size,
+    const char **out_event_type  // "OK" / "CRC_FAIL" / "LEN_INVALID" / "HEADER_INVALID" / "PREAMBLE_MISS"
 ) {
     // --- preamble 探索 ---
     size_t preamble_off = rx_buf_find_preamble(buf);
@@ -550,6 +566,7 @@ static FramerResult rx_framer_step(
         totals->resync_count++;
         totals->bad_size += preamble_off;
         rx_buf_consume(buf, preamble_off);
+        *out_event_type = "PREAMBLE_MISS";
         return FRAMER_RESYNCED;
     }
 
@@ -573,7 +590,9 @@ static FramerResult rx_framer_step(
         write_log_line(log_fp, "WARN", msg);
         totals->resync_count++;
         totals->bad_size++;
+        totals->len_invalid++;
         rx_buf_consume(buf, 1);
+        *out_event_type = "LEN_INVALID";
         return FRAMER_RESYNCED;
     }
 
@@ -592,6 +611,7 @@ static FramerResult rx_framer_step(
         totals->resync_count++;
         totals->bad_size++;
         rx_buf_consume(buf, 1);
+        *out_event_type = "HEADER_INVALID";
         return FRAMER_RESYNCED;
     }
 
@@ -610,6 +630,7 @@ static FramerResult rx_framer_step(
         totals->resync_count++;
         totals->bad_header++;
         rx_buf_consume(buf, 1);
+        *out_event_type = "HEADER_INVALID";
         return FRAMER_RESYNCED;
     }
 
@@ -625,6 +646,7 @@ static FramerResult rx_framer_step(
         totals->resync_count++;
         totals->bad_crc++;
         rx_buf_consume(buf, frame_len);
+        *out_event_type = "CRC_FAIL";
         return FRAMER_RESYNCED;
     }
 
@@ -632,6 +654,7 @@ static FramerResult rx_framer_step(
     // バッファを消費する。この後 out->payload は無効（バッファが memmove で詰められる）。
     // 呼び出し元は out->header.seq / out->header.tx_ts のみ参照すること。
     rx_buf_consume(buf, frame_len);
+    *out_event_type = "OK";
     return FRAMER_OK;
 }
 
@@ -855,6 +878,7 @@ int main(int argc, char **argv) {
             // busy loop にならない理由:
             //   FRAMER_RESYNCED は必ず ≥1 バイトを消費するため、
             //   stream_buf.len が 0 になると次は FRAMER_NEED_MORE が返り break する。
+            const char *event_type = NULL;
             for (;;) {
                 FramerResult fr = rx_framer_step(
                     &stream_buf,
@@ -862,13 +886,15 @@ int main(int argc, char **argv) {
                     &totals,
                     files.log_fp,
                     msg,
-                    sizeof(msg)
+                    sizeof(msg),
+                    &event_type
                 );
 
                 if (fr == FRAMER_NEED_MORE) {
                     break;
                 }
                 if (fr == FRAMER_RESYNCED) {
+                    write_fault_csv(&files, ts.recv_now_ns, event_type);
                     continue;
                 }
 
