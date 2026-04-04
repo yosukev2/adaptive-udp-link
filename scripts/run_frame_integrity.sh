@@ -107,7 +107,8 @@ for ci in "${!FAULT_RATES[@]}"; do
         sleep 1
 
         # tx をフォアグラウンドで起動
-        if [ "$(echo "$FAULT_RATE > 0" | bc -l)" -eq 1 ]; then
+        # bc を使わず文字列比較で判定する（bc が存在しない環境でのサイレント誤動作防止）
+        if [ "$FAULT_RATE" != "0.00" ]; then
             ./bin/tx \
                 --dst-ip "$DST_IP" \
                 --dst-port "$PORT" \
