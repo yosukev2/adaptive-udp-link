@@ -1,0 +1,19 @@
+# 実験条件
+
+実施日時: 2026-04-04 07:56:31
+OS: Linux 6.6.87.2-microsoft-standard-WSL2
+送信レート: 100 frame/s
+計測時間: 30 秒/試行
+ペイロードサイズ: tx デフォルト（frame_v1_wire.h の kFrameV1DefaultPayloadLen による）
+fault-target: crc
+破損率（fault-rate）:
+  条件A: 0.00（破損なし）
+  条件B: 0.01（約1%）
+  条件C: 0.05（約5%）
+  条件D: 0.10（約10%）
+試行回数: 3 回/条件
+ネットワーク: ローカルループバック（127.0.0.1）
+TX_FRAMES_PER_DATAGRAM: 3（1 datagram = 3 frame 連結）
+
+# parse_ok_rate の計算式
+# parse_ok_rate = recv_ok / (recv_ok + crc_fail + preamble_miss + len_invalid)
