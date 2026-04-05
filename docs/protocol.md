@@ -96,7 +96,35 @@ flags は判定に用いない。
 
 受信側は datagram 内で preamble を再探索（resync）し、破損 frame の次の正常 frame から復帰できる。
 
-## 9. 受信ループの統計カウンタ
+## 9. trial_summary の固定列
+
+Host と MCU/実リンクで同じ列順を使うため、受信側は `--link-name` と `--trial` の両方が与えられた trial 終了時に、以下の 1 行 summary を出す。
+
+```text
+trial_summary link_name=<token> trial=<n> duration_sec=<sec> sent=<n|na> recv_ok=<n> gap_est=<n> crc_fail=<n> len_invalid=<n> preamble_miss=<n> resync_count=<n> latency_p50_ms=<value> latency_p95_ms=<value> latency_max_ms=<value>
+```
+
+列順は固定で、順番を入れ替えない。どちらかの metadata が欠ける run では、誤った trial 識別子を出さないため `trial_summary` を出力しない。
+
+| 列 | 意味 |
+|----|------|
+| link_name | 比較対象の link 識別子。Host loopback / MCU / 実リンク名などを token で入れる。rx 単体では `--link-name` を受け取り、token 以外の文字は `_` に正規化する。 |
+| trial | 同一条件内の試行番号。rx 単体では `--trial` で受け取る。 |
+| duration_sec | rx がその trial で観測する設定時間（`--duration-sec`）。 |
+| sent | trial 全体で送信側が把握している frame 数。rx 単体では確定できないため、W03 #55 時点では `na` を出す。 |
+| recv_ok | parse / validate / CRC がすべて成功した frame 数。 |
+| gap_est | seq の不連続から推定した欠落 frame 数。従来の `gap_cnt` と同義。 |
+| crc_fail | CRC32 不一致で棄却した frame 数。従来の `bad_crc` と同義。 |
+| len_invalid | payload_len 超過で棄却した frame 数。 |
+| preamble_miss | preamble が先頭にないと判定して再探索した回数。 |
+| resync_count | 受信側が次の preamble を探し直した回数。 |
+| latency_p50_ms | 正常受信 frame の latency p50。W03 #57 までは予約列として `na` を出す。 |
+| latency_p95_ms | 正常受信 frame の latency p95。W03 #57 までは予約列として `na` を出す。 |
+| latency_max_ms | 正常受信 frame の latency max。W03 #57 までは予約列として `na` を出す。 |
+
+`trial_summary` は列順と意味を固定するための summary であり、既存の `rx summary` は補助ログとして残してよい。
+
+## 10. 受信ループの統計カウンタ
 
 | カウンタ | 意味 |
 |---------|------|
@@ -110,7 +138,7 @@ flags は判定に用いない。
 | dup_cnt | 同一 seq を持つフレームを受信した回数 |
 | reord_cnt | seq が前回より小さいフレームを受信した回数（逆順到着の推定） |
 
-## 10. 設計判断
+## 11. 設計判断
 
 ### preamble 長（4 bytes）
 
