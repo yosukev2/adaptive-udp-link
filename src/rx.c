@@ -78,6 +78,10 @@ typedef struct {
     int port;              // bindポート
     int duration_sec;       // 実行時間（受信ループの終了条件）
     const char *log_path;  // ログファイルパス
+    const char *link_name;  // trial_summary の link 識別子（Host loopback / 実リンク名など）
+    bool has_link_name;    // --link-name が明示指定されたか
+    int trial;             // trial_summary の試行番号（1始まりを想定）
+    bool has_trial;        // --trial が明示指定されたか
     const char *csv_in_1sec_log_path;  // １秒ごとの統計ログ（rx_stats）をCSV形式で出力する場合のファイルパス（オプション、未指定ならCSV出力しない）
     const char *csv_by_1recv_log_path;  // 受信ごとの統計ログ（rx_stats）をCSV形式で出力する場合のファイルパス（オプション、未指定ならCSV出力しない）
     int crc32_test_mode;  // ハードコードした v1 フレームで CRC32 を確認する
@@ -166,7 +170,7 @@ typedef enum {
 
 static void print_usage(const char *prog) {
     fprintf(stderr,
-            "Usage: %s --bind-ip <ip> --port <port> --duration-sec <sec> --log-path <path> [--csv-in-1sec-log-path <path>] [--csv-by-1recv-log-path <path>] [--crc32-test]\n",
+            "Usage: %s --bind-ip <ip> --port <port> --duration-sec <sec> --log-path <path> [--link-name <name>] [--trial <n>] [--csv-in-1sec-log-path <path>] [--csv-by-1recv-log-path <path>] [--crc32-test]\n",
             prog);
 }
 
@@ -189,9 +193,11 @@ static int parse_args(int argc, char **argv, RxConfig *cfg) {
         {"port", required_argument, 0, 2},
         {"duration-sec", required_argument, 0, 3},
         {"log-path", required_argument, 0, 4},
-        {"csv-in-1sec-log-path", required_argument, 0, 5},
-        {"csv-by-1recv-log-path", required_argument, 0, 6},
-        {"crc32-test", no_argument, 0, 7},
+        {"link-name", required_argument, 0, 5},
+        {"trial", required_argument, 0, 6},
+        {"csv-in-1sec-log-path", required_argument, 0, 7},
+        {"csv-by-1recv-log-path", required_argument, 0, 8},
+        {"crc32-test", no_argument, 0, 9},
         {0, 0, 0, 0}
     };
 
@@ -222,13 +228,27 @@ static int parse_args(int argc, char **argv, RxConfig *cfg) {
                 break;
 
             case 5:
-                cfg->csv_in_1sec_log_path = optarg;
+                cfg->link_name = optarg;
+                cfg->has_link_name = true;
                 break;
 
             case 6:
+                if (parse_int(optarg, &cfg->trial) != 0 || cfg->trial <= 0) {
+                    fprintf(stderr, "Invalid --trial: %s\n", optarg);
+                    print_usage(argv[0]);
+                    return -1;
+                }
+                cfg->has_trial = true;
+                break;
+
+            case 7:
+                cfg->csv_in_1sec_log_path = optarg;
+                break;
+
+            case 8:
                 cfg->csv_by_1recv_log_path = optarg;
                 break;
-            case 7:
+            case 9:
                 cfg->crc32_test_mode = 1;
                 break;
 
@@ -351,6 +371,71 @@ static void write_summary(const RxFiles *files, const RxTotals *totals, uint64_t
         totals->reord_cnt,
         totals->future_ts_cnt,
         totals->future_ts_detected
+    );
+
+    write_log_line(files->log_fp, "INFO", msg);
+}
+
+static bool is_trial_summary_token_char(char ch) {
+    return
+        (ch >= '0' && ch <= '9') ||
+        (ch >= 'A' && ch <= 'Z') ||
+        (ch >= 'a' && ch <= 'z') ||
+        ch == '_' || ch == '-' || ch == '.' || ch == ':';
+}
+
+static void normalize_trial_summary_link_name(const char *link_name, char *out, size_t out_size) {
+    size_t i = 0;
+
+    if (!out || out_size == 0) {
+        return;
+    }
+
+    if (!link_name || link_name[0] == '\0') {
+        snprintf(out, out_size, "unknown");
+        return;
+    }
+
+    for (; link_name[i] != '\0' && i + 1 < out_size; i++) {
+        out[i] = is_trial_summary_token_char(link_name[i]) ? link_name[i] : '_';
+    }
+    out[i] = '\0';
+
+    if (i == 0) {
+        snprintf(out, out_size, "unknown");
+    }
+}
+
+static void write_trial_summary(const RxFiles *files, const RxConfig *config, const RxTotals *totals) {
+    char msg[768];
+    char link_name_token[128];
+
+    if (!files || !files->log_fp || !config || !totals) {
+        return;
+    }
+    if (!config->has_link_name || !config->has_trial) {
+        return;
+    }
+
+    normalize_trial_summary_link_name(config->link_name, link_name_token, sizeof(link_name_token));
+
+    snprintf(
+        msg,
+        sizeof(msg),
+        "trial_summary link_name=%s trial=%d duration_sec=%d sent=na"
+        " recv_ok=%" PRIu64 " gap_est=%" PRIu64 " crc_fail=%" PRIu64
+        " len_invalid=%" PRIu64 " preamble_miss=%" PRIu64
+        " resync_count=%" PRIu64
+        " latency_p50_ms=na latency_p95_ms=na latency_max_ms=na",
+        link_name_token,
+        config->trial,
+        config->duration_sec,
+        totals->recv_ok,
+        totals->gap_cnt,
+        totals->bad_crc,
+        totals->len_invalid,
+        totals->preamble_miss,
+        totals->resync_count
     );
 
     write_log_line(files->log_fp, "INFO", msg);
@@ -716,6 +801,8 @@ int main(int argc, char **argv) {
     // rx は bind-ip を省略可能にしておく（利便性のため）
     // 将来、ローカル検証時は 127.0.0.1、複数NIC環境では 0.0.0.0 と使い分けられる
     cfg.bind_ip = "0.0.0.0";
+    cfg.link_name = "unknown";
+    cfg.trial = 0;
 
     if (parse_args(argc, argv, &cfg) != 0) {
         return 1;
@@ -936,6 +1023,7 @@ int main(int argc, char **argv) {
 
     if (files.log_fp) {
         write_summary(&files, &totals, elapsed_ns);
+        write_trial_summary(&files, &cfg, &totals);
         write_log_line(files.log_fp, "INFO", "rx end");
     }
 
