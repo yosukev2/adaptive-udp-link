@@ -1,0 +1,16 @@
+# fault signature 条件
+
+実施目的: fault-target ごとの主シグネチャを最小 1 回で比較する
+対象 target: preamble / payload_len / header / crc / payload
+trial: 1
+link_name prefix: host_loopback
+送信レート: 30 frame/s
+tx_duration_sec: 3 秒
+rx_duration_sec: 5 秒
+payload_len: 48
+fault_rate: 0.50
+tx_frames_per_datagram: 3
+bind_ip: 127.0.0.1
+dst_ip: 127.0.0.1
+port_base: 9200
+OS: Linux 6.6.87.2-microsoft-standard-WSL2
