@@ -18,7 +18,7 @@
 //
 // このファイルが担当しないこと（別段階/別責務）
 //   - FrameV1 の wire format 定数・serialize/deserialize（→ frame_v1_wire.c）
-//   - 高度な統計（P95/P99, ヒストグラム, ジッタ詳細）
+//   - 高度な統計（P99, ヒストグラム, ジッタ詳細）
 //   - 可視化 / オフライン集計
 //
 // 計測の前提と限界（重要）
@@ -112,6 +112,11 @@ typedef struct {
     uint64_t future_ts_detected;
     uint64_t min_latency_ns;
     uint64_t max_latency_ns;
+    uint64_t *latency_samples_ns;
+    size_t latency_samples_len;
+    size_t latency_samples_cap;
+    bool latency_samples_oom;
+    bool collect_latency_samples;
 } RxTotals;
 
 typedef struct {
@@ -406,9 +411,87 @@ static void normalize_trial_summary_link_name(const char *link_name, char *out, 
     }
 }
 
-static void write_trial_summary(const RxFiles *files, const RxConfig *config, const RxTotals *totals) {
+static int compare_u64_asc(const void *a, const void *b) {
+    uint64_t va = *(const uint64_t *)a;
+    uint64_t vb = *(const uint64_t *)b;
+
+    if (va < vb) {
+        return -1;
+    }
+    if (va > vb) {
+        return 1;
+    }
+    return 0;
+}
+
+static size_t latency_percentile_index(size_t sample_count, size_t percentile) {
+    size_t rank = (sample_count * percentile + 99) / 100;
+    if (rank == 0) {
+        rank = 1;
+    }
+    return rank - 1;
+}
+
+static void format_latency_ms(char *out, size_t out_size, uint64_t latency_ns) {
+    if (!out || out_size == 0) {
+        return;
+    }
+    snprintf(out, out_size, "%.3f", (double)latency_ns / 1000000.0);
+}
+
+static void build_trial_summary_latency_fields(
+    RxTotals *totals,
+    char *p50_ms,
+    size_t p50_ms_size,
+    char *p95_ms,
+    size_t p95_ms_size,
+    char *max_ms,
+    size_t max_ms_size
+) {
+    if (!totals || !p50_ms || !p95_ms || !max_ms) {
+        return;
+    }
+
+    snprintf(p50_ms, p50_ms_size, "na");
+    snprintf(p95_ms, p95_ms_size, "na");
+    snprintf(max_ms, max_ms_size, "na");
+
+    if (totals->latency_sample_cnt == 0) {
+        return;
+    }
+    if (totals->recv_ok != totals->latency_sample_cnt) {
+        return;
+    }
+    if (totals->latency_samples_oom || totals->latency_samples_len != totals->latency_sample_cnt) {
+        return;
+    }
+
+    qsort(
+        totals->latency_samples_ns,
+        totals->latency_samples_len,
+        sizeof(totals->latency_samples_ns[0]),
+        compare_u64_asc
+    );
+
+    format_latency_ms(
+        p50_ms,
+        p50_ms_size,
+        totals->latency_samples_ns[latency_percentile_index(totals->latency_samples_len, 50)]
+    );
+    format_latency_ms(
+        p95_ms,
+        p95_ms_size,
+        totals->latency_samples_ns[latency_percentile_index(totals->latency_samples_len, 95)]
+    );
+    format_latency_ms(max_ms, max_ms_size, totals->max_latency_ns);
+}
+
+static void write_trial_summary(const RxFiles *files, const RxConfig *config, RxTotals *totals) {
     char msg[768];
     char link_name_token[128];
+    char latency_p50_ms[32];
+    char latency_p95_ms[32];
+    char latency_max_ms[32];
 
     if (!files || !files->log_fp || !config || !totals) {
         return;
@@ -418,6 +501,15 @@ static void write_trial_summary(const RxFiles *files, const RxConfig *config, co
     }
 
     normalize_trial_summary_link_name(config->link_name, link_name_token, sizeof(link_name_token));
+    build_trial_summary_latency_fields(
+        totals,
+        latency_p50_ms,
+        sizeof(latency_p50_ms),
+        latency_p95_ms,
+        sizeof(latency_p95_ms),
+        latency_max_ms,
+        sizeof(latency_max_ms)
+    );
 
     snprintf(
         msg,
@@ -426,7 +518,7 @@ static void write_trial_summary(const RxFiles *files, const RxConfig *config, co
         " recv_ok=%" PRIu64 " gap_est=%" PRIu64 " crc_fail=%" PRIu64
         " len_invalid=%" PRIu64 " preamble_miss=%" PRIu64
         " resync_count=%" PRIu64
-        " latency_p50_ms=na latency_p95_ms=na latency_max_ms=na",
+        " latency_p50_ms=%s latency_p95_ms=%s latency_max_ms=%s",
         link_name_token,
         config->trial,
         config->duration_sec,
@@ -435,10 +527,34 @@ static void write_trial_summary(const RxFiles *files, const RxConfig *config, co
         totals->bad_crc,
         totals->len_invalid,
         totals->preamble_miss,
-        totals->resync_count
+        totals->resync_count,
+        latency_p50_ms,
+        latency_p95_ms,
+        latency_max_ms
     );
 
     write_log_line(files->log_fp, "INFO", msg);
+}
+
+static void append_latency_sample(RxTotals *totals, uint64_t latency_ns) {
+    size_t new_cap = 0;
+    uint64_t *new_buf = NULL;
+
+    if (!totals || !totals->collect_latency_samples || totals->latency_samples_oom) {
+        return;
+    }
+    if (totals->latency_samples_len == totals->latency_samples_cap) {
+        new_cap = (totals->latency_samples_cap == 0) ? 256 : totals->latency_samples_cap * 2;
+        new_buf = realloc(totals->latency_samples_ns, new_cap * sizeof(new_buf[0]));
+        if (!new_buf) {
+            totals->latency_samples_oom = true;
+            return;
+        }
+        totals->latency_samples_ns = new_buf;
+        totals->latency_samples_cap = new_cap;
+    }
+
+    totals->latency_samples_ns[totals->latency_samples_len++] = latency_ns;
 }
 
 static int now_monotonic_ns(uint64_t *out_ns) {
@@ -525,6 +641,7 @@ static void update_latency_stats(
         if (totals->min_latency_ns == 0 || ts->latency < totals->min_latency_ns) {
             totals->min_latency_ns = ts->latency;
         }
+        append_latency_sample(totals, ts->latency);
         if (ts->latency > win->max_latency_ns) {
             win->max_latency_ns = ts->latency;
         }
@@ -812,6 +929,8 @@ int main(int argc, char **argv) {
         return run_crc32_test_mode();
     }
 
+    totals.collect_latency_samples = cfg.has_link_name && cfg.has_trial;
+
     if (open_output_files(&cfg, &files) != 0) {
         return 1;
     }
@@ -1029,6 +1148,7 @@ int main(int argc, char **argv) {
 
     close_output_files(&files);
     close(sock);
+    free(totals.latency_samples_ns);
 
     printf("rx finished\n");
     return 0;
