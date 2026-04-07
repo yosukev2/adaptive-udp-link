@@ -118,11 +118,13 @@ trial_summary link_name=<token> trial=<n> duration_sec=<sec> sent=<n|na> recv_ok
 | len_invalid | payload_len 超過で棄却した frame 数。 |
 | preamble_miss | preamble が先頭にないと判定して再探索した回数。 |
 | resync_count | 受信側が次の preamble を探し直した回数。 |
-| latency_p50_ms | 正常受信 frame の latency p50。W03 #57 までは予約列として `na` を出す。 |
-| latency_p95_ms | 正常受信 frame の latency p95。W03 #57 までは予約列として `na` を出す。 |
-| latency_max_ms | 正常受信 frame の latency max。W03 #57 までは予約列として `na` を出す。 |
+| latency_p50_ms | 正常受信 frame の latency p50。`recv_ok` に数えた frame のうち、`tx_ts <= recv_now` で latency を確定できたものだけを候補にする。sample 数が 0 の run、または `future_ts` が混じって `recv_ok` 全体を代表できない run では `na` を出す。 |
+| latency_p95_ms | 正常受信 frame の latency p95。`recv_ok` に数えた frame のうち、`tx_ts <= recv_now` で latency を確定できたものだけを候補にする。sample 数が 0 の run、または `future_ts` が混じって `recv_ok` 全体を代表できない run では `na` を出す。 |
+| latency_max_ms | 正常受信 frame の latency max。`recv_ok` に数えた frame のうち、`tx_ts <= recv_now` で latency を確定できたものだけを候補にする。sample 数が 0 の run、または `future_ts` が混じって `recv_ok` 全体を代表できない run では `na` を出す。 |
 
 `trial_summary` は列順と意味を固定するための summary であり、既存の `rx summary` は補助ログとして残してよい。
+
+percentile の算出は nearest-rank を使う。sample 数が 1 の場合は `p50 = p95 = max` になり、偶数個でも中央値補間はしない。percentile 用サンプルは `trial_summary` を出す run でだけ保持する。
 
 ## 10. 受信ループの統計カウンタ
 
