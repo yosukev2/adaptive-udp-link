@@ -1,0 +1,6 @@
+target,trial,link_name,rate_hz,duration_sec,payload_len,fault_rate,recv_ok,gap_est,crc_fail,len_invalid,preamble_miss,resync_count,bad_header,signature_hint
+preamble,1,host_loopback_preamble,30,5,48,0.50,41,44,0,0,21,39,0,trial_summary では header と曖昧 (preamble_miss + resync_count)
+payload_len,1,host_loopback_payload_len,30,5,48,0.50,45,48,0,48,48,113,0,len_invalid + resync_count
+header,1,host_loopback_header,30,5,48,0.50,45,46,0,0,48,113,48,trial_summary では preamble と曖昧; Host補助では bad_header
+crc,1,host_loopback_crc,30,5,48,0.50,42,48,51,0,0,51,0,crc_fail
+payload,1,host_loopback_payload,30,5,48,0.50,47,46,46,0,0,46,0,crc_fail
