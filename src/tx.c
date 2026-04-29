@@ -80,6 +80,11 @@ typedef struct {
     uint64_t t_start_ns;
     uint64_t now_ns;
     uint64_t tx_ts_ns;
+    uint64_t next_stats_ns;
+    uint64_t last_stats_wall_ns;
+    uint64_t last_process_cpu_ns;
+    uint32_t last_sent_datagrams;
+    uint32_t last_sent_frames;
 } TxTimingState;
 
 static void print_usage(const char *prog) {
@@ -401,6 +406,15 @@ static int now_monotonic_ns(uint64_t *out_ns) {
     return 0;
 }
 
+static int now_process_cpu_ns(uint64_t *out_ns) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts) != 0) {
+        return -1;
+    }
+    *out_ns = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+    return 0;
+}
+
 static int build_dst_addr(const char *ip, int port, struct sockaddr_in *out) {
     memset(out, 0, sizeof(*out));
     out->sin_family = AF_INET;
@@ -428,6 +442,49 @@ static void timespec_add_ns(struct timespec *t, uint64_t ns) {
         t->tv_sec -= 1;
         t->tv_nsec += 1000000000L;
     }
+}
+
+static void write_stats_per_1sec(const TxFiles *files, TxTimingState *ts, const TxTotals *totals) {
+    char msg[256];
+    uint64_t process_cpu_now_ns = 0;
+    uint64_t cpu_delta_ns = 0;
+    uint64_t window_elapsed_ns = ts->next_stats_ns - ts->last_stats_wall_ns;
+    uint32_t datagrams_delta = totals->sent - ts->last_sent_datagrams;
+    uint32_t frames_delta = totals->seq - ts->last_sent_frames;
+    double pps = (window_elapsed_ns > 0)
+        ? ((double)datagrams_delta * 1000000000.0 / (double)window_elapsed_ns)
+        : 0.0;
+    double cpu_pct = 0.0;
+    uint64_t elapsed_sec = (ts->next_stats_ns - ts->t_start_ns) / UINT64_C(1000000000);
+
+    if (!files || !files->log_fp || !ts || !totals) {
+        return;
+    }
+
+    if (now_process_cpu_ns(&process_cpu_now_ns) == 0) {
+        if (process_cpu_now_ns >= ts->last_process_cpu_ns && window_elapsed_ns > 0) {
+            cpu_delta_ns = process_cpu_now_ns - ts->last_process_cpu_ns;
+            cpu_pct = (double)cpu_delta_ns * 100.0 / (double)window_elapsed_ns;
+        }
+        ts->last_process_cpu_ns = process_cpu_now_ns;
+    }
+
+    snprintf(
+        msg,
+        sizeof(msg),
+        "tx_stats elapsed_sec=%" PRIu64 " sent_datagrams=%" PRIu32
+        " sent_frames=%" PRIu32 " pps=%.2f cpu_pct=%.2f",
+        elapsed_sec,
+        datagrams_delta,
+        frames_delta,
+        pps,
+        cpu_pct
+    );
+    write_log_line(files->log_fp, "INFO", msg);
+
+    ts->last_stats_wall_ns = ts->next_stats_ns;
+    ts->last_sent_datagrams = totals->sent;
+    ts->last_sent_frames = totals->seq;
 }
 
 static void fill_payload_pattern(uint8_t *payload, size_t payload_len) {
@@ -549,6 +606,11 @@ int main(int argc, char **argv) {
         close_output_files(&files);
         return 1;
     }
+    ts.next_stats_ns = ts.t_start_ns + 1000000000ULL;
+    ts.last_stats_wall_ns = ts.t_start_ns;
+    if (now_process_cpu_ns(&ts.last_process_cpu_ns) != 0) {
+        ts.last_process_cpu_ns = 0;
+    }
 
     if (now_monotonic_ns(&ts.now_ns) != 0) {
         perror("clock_gettime");
@@ -652,6 +714,11 @@ int main(int argc, char **argv) {
 
         totals.seq += TX_FRAMES_PER_DATAGRAM;
         totals.sent++;
+
+        while (ts.now_ns >= ts.next_stats_ns) {
+            write_stats_per_1sec(&files, &ts, &totals);
+            ts.next_stats_ns += 1000000000ULL;
+        }
     }
 
     close(sock);
@@ -664,6 +731,11 @@ int main(int argc, char **argv) {
     }
 
     uint64_t elapsed_ns = (t_end_ns > ts.t_start_ns) ? (t_end_ns - ts.t_start_ns) : 0;
+
+    while (t_end_ns >= ts.next_stats_ns) {
+        write_stats_per_1sec(&files, &ts, &totals);
+        ts.next_stats_ns += 1000000000ULL;
+    }
 
     if (files.log_fp) {
         write_summary(&files, &totals, elapsed_ns);
