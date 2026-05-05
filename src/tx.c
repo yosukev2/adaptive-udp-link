@@ -1,27 +1,27 @@
 // src/tx.c
 //
-// [?2004l[?2004h[?2004l[?2004h[?2004l[?2004h[?2004l[?2004h
-//   - UDP[?2004l[?2004h[?2004l[?2004h[?2004l[?2004h[?2004l[?2004h[?2004l[?2004h[?2004l[?2004h[?2004l[?2004h[?2004l[?2004h[?2004l[?2004h[?2004l[?2004h[?2004l[?2004h[?2004l[?2004h[?2004l[?2004h[?2004l[?2004h[?2004l[?2004h entrypoint
-//   - CLI[?2004l[?2004h[?2004l[?2004h[?2004l[?2004h[?2004l[?2004h[?2004l[?2004h parse
-//   - CLOCK_MONOTONIC [?2004l[?2004h[?2004l[?2004h fixed-rate loop
-//   - Frame v1 serialize and UDP send
-//   - logging (start / summary / end)
+// 役割
+//   - UDP送信プログラム（tx）のエントリポイント
+//   - CLI引数の解析（dst-ip / dst-port / rate-hz / duration-sec / log-path）
+//   - CLOCK_MONOTONIC ベースの固定レート送信ループ
+//   - Frame v1 を手動 serialize して UDP送信
+//   - ログ出力（start / summary / end）
 //
-// [?2004l[?2004h[?2004l[?2004h[?2004l[?2004h[?2004l[?2004h
-//   - UDP socket / destination / sendto
-//   - runtime management (duration_sec)
-//   - rate_hz based schedule
-//   - minimal summary logging
+// このファイルが担当すること
+//   - UDPソケット生成 / 宛先アドレス構築 / sendto
+//   - 実行時間管理（duration_sec）
+//   - rate_hz に基づく送信周期の計算と送信ループ
+//   - 最小統計の集計と summary ログ出力
 //
-// [?2004l[?2004h[?2004l[?2004h[?2004l[?2004h[?2004l[?2004h
-//   - retransmission / ACK
-//   - congestion control / rate adaptation
-//   - advanced stats / visualization
+// このファイルが担当しないこと（別段階/別責務）
+//   - 再送制御 / ACK 処理
+//   - 輻輳制御 / レート適応
+//   - 高度な送信統計 / 可視化
 //
-// [?2004l[?2004h[?2004l[?2004h[?2004l[?2004h[?2004l[?2004h
-//   - tx_ts is CLOCK_MONOTONIC send timestamp
-//   - avg_rate_hz is measured over elapsed_ns
-//   - sendto success does not guarantee delivery
+// 計測の前提と限界（重要）
+//   - tx_ts は CLOCK_MONOTONIC の送信時刻
+//   - avg_rate_hz は elapsed_ns に対する実測平均
+//   - sendto の成功は受信側への到達保証を意味しない
 #include <errno.h>
 #include <getopt.h>
 #include <stdio.h>
@@ -38,28 +38,30 @@
 
 #include "frame_v1_wire.h"
 
+// 1 UDP datagram に連結して送信する frame 数
 #define TX_FRAMES_PER_DATAGRAM 3
 
+// 故障注入の対象フィールド
 typedef enum {
     FAULT_NONE        = 0,
-    FAULT_PREAMBLE    = 1,
-    FAULT_PAYLOAD_LEN = 2,
-    FAULT_CRC         = 3,
-    FAULT_PAYLOAD     = 4,
-    FAULT_HEADER      = 5,
+    FAULT_PREAMBLE    = 1,  // preamble (bytes 0-3) の任意 1bit を反転 → PREAMBLE_MISS
+    FAULT_PAYLOAD_LEN = 2,  // payload_len を上限超えの値に書き換え → LEN_INVALID
+    FAULT_CRC         = 3,  // crc32 フィールド (bytes 21-24) の任意 1bit を反転 → CRC_FAIL
+    FAULT_PAYLOAD     = 4,  // payload の任意 1bit を反転 → CRC_FAIL
+    FAULT_HEADER      = 5,  // version または header_len を不正値に書き換え → HEADER_INVALID
 } FaultTarget;
 
 typedef struct {
-    const char *dst_ip;
-    int dst_port;
-    int rate_hz;
-    int duration_sec;
-    const char *log_path;
-    int payload_len;
-    int version;
-    int crc32_test_mode;
-    FaultTarget fault_target;
-    float fault_rate;
+    const char *dst_ip;         // 送信先IP（例: "127.0.0.1"）
+    int dst_port;               // 送信先ポート
+    int rate_hz;                // 送信レート（Hz）
+    int duration_sec;           // 実行時間
+    const char *log_path;       // ログファイルパス
+    int payload_len;            // 送信する payload 長（byte）
+    int version;                // プロトコルバージョン（現状は v1 固定）
+    int crc32_test_mode;        // ハードコードした v1 フレームで CRC32 を確認する
+    FaultTarget fault_target;   // 故障注入の対象フィールド（FAULT_NONE = 無効）
+    float fault_rate;           // 故障注入確率（0.0〜1.0）
 } TxConfig;
 
 typedef struct {
@@ -72,8 +74,9 @@ typedef struct {
 } TxTotals;
 
 typedef struct {
-    struct timespec next_send;
-    uint64_t period_ns;
+    struct timespec next_send;  // 次回送信予定時刻（絶対時刻, CLOCK_MONOTONIC）
+    uint64_t period_ns;         // 基本送信周期 = 1_000_000_000 / rate_hz（端数切り捨て）
+                                // ループ内では remainder 補正後の this_period を使う
     uint64_t t_start_ns;
     uint64_t now_ns;
     uint64_t tx_ts_ns;
@@ -223,7 +226,7 @@ static int parse_args(int argc, char **argv, TxConfig *cfg) {
         return -1;
     }
     if (cfg->payload_len < 0 || cfg->payload_len > FRAME_V1_PAYLOAD_MAX_BYTES) {
-        fprintf(stderr, "Invalid --payload-len: %d (expected 0..%d)\n", cfg->payload_len, FRAME_V1_PAYLOAD_MAX_BYTES);
+        fprintf(stderr, "Invalid --payload-len: %d (expected 0..%d)\n", cfg->payload_len, FRAME_V1_PAYLOAD_MAX_BYTES );
         print_usage(argv[0]);
         return -1;
     }
@@ -275,10 +278,12 @@ static const char *fault_target_name(FaultTarget t) {
         case FAULT_CRC:         return "crc";
         case FAULT_PAYLOAD:     return "payload";
         case FAULT_HEADER:      return "header";
-        default:                return "none";
+        default:             return "none";
     }
 }
 
+// 故障注入: frame_v1_build() 後の wire バイト列に対して�arget フィールドを破壊する。
+// 確率 rate で注入し、実施した場合はログに記録する。
 static void apply_fault_injection(
     FaultTarget target,
     float rate,
@@ -288,6 +293,7 @@ static void apply_fault_injection(
     uint32_t seq,
     FILE *log_fp
 ) {
+    // 確率判定
     float r = (float)rand() / ((float)RAND_MAX + 1.0f);
     if (r >= rate) {
         return;
@@ -297,6 +303,7 @@ static void apply_fault_injection(
 
     switch (target) {
         case FAULT_PREAMBLE: {
+            // preamble (bytes 0-3) の任意 1bit を反転
             int byte_off = rand() % 4;
             int bit_off  = rand() % 8;
             frame_buf[byte_off] ^= (uint8_t)(1U << bit_off);
@@ -306,6 +313,7 @@ static void apply_fault_injection(
             break;
         }
         case FAULT_PAYLOAD_LEN: {
+            // payload_len を上限超えの値に書き換え
             uint16_t bad_len = (uint16_t)(FRAME_V1_PAYLOAD_MAX_BYTES + 1);
             frame_buf[FRAME_V1_PAYLOAD_LEN_OFFSET]     = (uint8_t)(bad_len >> 8);
             frame_buf[FRAME_V1_PAYLOAD_LEN_OFFSET + 1] = (uint8_t)bad_len;
@@ -315,6 +323,7 @@ static void apply_fault_injection(
             break;
         }
         case FAULT_CRC: {
+            // crc32 フィールド (bytes 21-24) の任意 1bit を反転
             int byte_off = FRAME_V1_CRC32_OFFSET + rand() % 4;
             int bit_off  = rand() % 8;
             frame_buf[byte_off] ^= (uint8_t)(1U << bit_off);
@@ -324,6 +333,7 @@ static void apply_fault_injection(
             break;
         }
         case FAULT_PAYLOAD: {
+            // payload_len=0 のときは注入不可
             if (payload_len == 0) {
                 snprintf(msg, sizeof(msg),
                          "seq=%" PRIu32 ": fault skip payload (payload_len=0)", seq);
@@ -339,6 +349,7 @@ static void apply_fault_injection(
             break;
         }
         case FAULT_HEADER: {
+            // version または header_len をランダムに不正値に書き換え
             if (rand() % 2 == 0) {
                 frame_buf[FRAME_V1_VERSION_OFFSET] = kFrameV1Version + 1U;
                 snprintf(msg, sizeof(msg),
@@ -357,7 +368,7 @@ static void apply_fault_injection(
     }
 
     write_log_line(log_fp, "INFO", msg);
-    (void)frame_len;
+    (void)frame_len;  // 将来の範囲チェック拡張用
 }
 
 static void write_summary(const TxFiles *files, const TxTotals *totals, uint64_t elapsed_ns) {
@@ -369,6 +380,7 @@ static void write_summary(const TxFiles *files, const TxTotals *totals, uint64_t
     }
 
     if (elapsed_ns > 0) {
+        // avg_rate_hz はフレームレート（frame/s）。totals->seq がフレーム総数。
         avg_rate = (double)totals->seq / ((double)elapsed_ns / 1e9);
     }
 
@@ -516,6 +528,7 @@ int main(int argc, char **argv) {
         return run_crc32_test_mode();
     }
 
+    // 故障注入の乱数シードを初期化
     srand((unsigned int)time(NULL));
 
     if (open_output_files(&cfg, &files) != 0) {
@@ -571,6 +584,12 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    // --rate-hz はフレームレート（frame/s）として扱う。
+    // 1 datagram に TX_FRAMES_PER_DATAGRAM フレームを含むため、
+    // datagram 送信周期 = (1s * TX_FRAMES_PER_DATAGRAM) / rate_hz となる。
+    // 例) rate_hz=100, TX_FRAMES_PER_DATAGRAM=3:
+    //   period_ns = 3000000000/100 = 30000000 ns (30 ms)
+    //   → 33.3 datagram/s × 3 frame = 100 frame/s ✓
     ts.period_ns = (1000000000ULL * (uint64_t)TX_FRAMES_PER_DATAGRAM) / (uint64_t)cfg.rate_hz;
     uint64_t period_remainder = (1000000000ULL * (uint64_t)TX_FRAMES_PER_DATAGRAM) % (uint64_t)cfg.rate_hz;
     uint64_t remainder_acc = 0;
@@ -600,6 +619,10 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    // 初回送信即時化:
+    //   next_send を 1 周期分だけ過去に設定しておく。
+    //   ループ先頭の timespec_add_ns で next_send += period となり、
+    //   clock_nanosleep は過去時刻 (≈ t_start) を目標とするため即時返る。
     ts.next_send.tv_nsec -= (long)(ts.period_ns % 1000000000ULL);
     ts.next_send.tv_sec  -= (long)(ts.period_ns / 1000000000ULL);
     if (ts.next_send.tv_nsec < 0) {
@@ -608,6 +631,7 @@ int main(int argc, char **argv) {
     }
 
     while (ts.now_ns - ts.t_start_ns < (uint64_t)cfg.duration_sec * 1000000000ULL) {
+        // remainder 補正: 端数を蓄積し rate_hz 回で +1ns して長期平均を合わせる
         uint64_t this_period = ts.period_ns;
         remainder_acc += period_remainder;
         if (remainder_acc >= (uint64_t)cfg.rate_hz) {
@@ -638,6 +662,7 @@ int main(int argc, char **argv) {
             ts.next_stats_ns += 1000000000ULL;
         }
 
+        // TX_FRAMES_PER_DATAGRAM 個のフレームを datagram_buf に連結してから 1 回の sendto で送る
         size_t datagram_len = 0;
         int build_ok = 1;
         for (int fi = 0; fi < TX_FRAMES_PER_DATAGRAM && build_ok; fi++) {
@@ -664,6 +689,7 @@ int main(int argc, char **argv) {
                 write_log_line(files.log_fp, "INFO", buf);
                 logged_first_frame = 1;
             }
+            // 故障注入（frame_v1_build 後の wire バイト列を直接書き換える）
             if (cfg.fault_target != FAULT_NONE) {
                 apply_fault_injection(
                     cfg.fault_target,
@@ -720,7 +746,6 @@ int main(int argc, char **argv) {
         write_summary(&files, &totals, elapsed_ns);
         write_log_line(files.log_fp, "INFO", "tx end");
     }
-
     close_output_files(&files);
 
     printf("tx finished\n");
