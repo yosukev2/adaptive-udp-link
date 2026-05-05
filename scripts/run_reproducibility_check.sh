@@ -48,7 +48,7 @@ average_csv_column() {
     local field_index="$2"
     awk -F, -v field_index="${field_index}" '
         NR == 1 { next }
-        $field_index != "" {
+        $5 > 0 && $field_index != "" {
             sum += $field_index
             count++
         }
