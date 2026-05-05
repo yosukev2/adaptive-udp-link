@@ -62,6 +62,10 @@ average_csv_column() {
     ' "${csv_path}"
 }
 
+is_decimal_value() {
+    printf '%s\n' "$1" | grep -Eq '^[0-9]+([.][0-9]+)?$'
+}
+
 cat > "${CSV_PATH}" <<'HEADER'
 trial,link_name,rate_hz,duration_sec,payload_len,tx_frames_per_datagram,recv_ok,gap_est,crc_fail,len_invalid,preamble_miss,resync_count,latency_p95_ms,latency_p99_ms,latency_max_ms,avg_pps,avg_cpu_pct,p99_deviation_pct_from_mean,reproducible
 HEADER
@@ -121,6 +125,11 @@ for trial in $(seq 1 "${TRIALS}"); do
     avg_pps="$(average_csv_column "${rx_csv}" 10)"
     avg_cpu_pct="$(average_csv_column "${rx_csv}" 11)"
 
+    if ! is_decimal_value "${latency_p99_ms}"; then
+        echo "[ERROR] invalid latency_p99_ms for trial ${trial}: ${latency_p99_ms}"
+        exit 1
+    fi
+
     echo "${trial},${LINK_NAME},${RATE_HZ},${DURATION_SEC},${PAYLOAD_LEN},${TX_FRAMES_PER_DATAGRAM},${recv_ok},${gap_est},${crc_fail},${len_invalid},${preamble_miss},${resync_count},${latency_p95_ms},${latency_p99_ms},${latency_max_ms},${avg_pps},${avg_cpu_pct},pending,pending" >> "${CSV_PATH}"
 done
 
@@ -134,6 +143,10 @@ awk -F, -v threshold="${REPRO_THRESHOLD_PCT}" '
     }
     {
         rows[NR] = $0
+        if ($14 !~ /^[0-9]+(\.[0-9]+)?$/) {
+            printf "invalid latency_p99_ms at CSV row %d: %s\n", NR, $14 > "/dev/stderr"
+            exit 1
+        }
         p99[NR] = $14 + 0
         sum += p99[NR]
         count++
@@ -148,14 +161,17 @@ awk -F, -v threshold="${REPRO_THRESHOLD_PCT}" '
         max_dev = 0.0
         for (i = 2; i <= NR; i++) {
             dev = (mean == 0.0) ? 0.0 : ((p99[i] - mean) < 0 ? -(p99[i] - mean) : (p99[i] - mean)) * 100.0 / mean
+            devs[i] = dev
             if (dev > threshold) {
                 pass = "no"
             }
             if (dev > max_dev) {
                 max_dev = dev
             }
+        }
+        for (i = 2; i <= NR; i++) {
             split(rows[i], cols, FS)
-            cols[18] = sprintf("%.2f", dev)
+            cols[18] = sprintf("%.2f", devs[i])
             cols[19] = pass
             out = cols[1]
             for (j = 2; j <= 19; j++) {
