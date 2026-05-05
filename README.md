@@ -33,7 +33,7 @@ make test
 `make test` は以下を実行します。
 
 - `bin/test_framer`
-- `scripts/test_loopback_metrics.sh`
+- `bash scripts/test_loopback_metrics.sh`
 
 ## Quick Loopback Run
 
@@ -58,7 +58,7 @@ W04 の標準手順はこのスクリプトです。
 
 ```bash
 make all
-RESULT_DIR=logs/reproducibility/w04_baseline_20260429 ./scripts/run_reproducibility_check.sh
+RESULT_DIR=logs/reproducibility/w04_baseline_20260429 bash scripts/run_reproducibility_check.sh
 ```
 
 主な生成物:
@@ -73,7 +73,7 @@ RESULT_DIR=logs/reproducibility/w04_baseline_20260429 ./scripts/run_reproducibil
 
 ```bash
 RATE_HZ=120 DURATION_SEC=5 PAYLOAD_LEN=64 LINK_NAME=host_loopback \
-RESULT_DIR=logs/reproducibility/custom_run ./scripts/run_reproducibility_check.sh
+RESULT_DIR=logs/reproducibility/custom_run bash scripts/run_reproducibility_check.sh
 ```
 
 ## How To Read P95 And P99
@@ -106,7 +106,7 @@ W04 では、3 trial の `latency_p99_ms` それぞれについて `abs(trial_p9
 
 ## Protocol Notes
 
-固定列の意味は [docs/protocol.md](/mnt/c/Users/tyosu/Desktop/adaptive-udp-link/docs/protocol.md:99) を参照してください。W04 では以下を固定しています。
+固定列の意味は [docs/protocol.md](docs/protocol.md) を参照してください。W04 では以下を固定しています。
 
 - `trial_summary` の `latency_p50_ms / latency_p95_ms / latency_p99_ms / latency_max_ms`
 - 1 秒統計の `pps / cpu_pct`
@@ -114,4 +114,4 @@ W04 では、3 trial の `latency_p99_ms` それぞれについて `abs(trial_p9
 
 ## CI
 
-GitHub Actions は [ci.yml](/mnt/c/Users/tyosu/Desktop/adaptive-udp-link/.github/workflows/ci.yml:1) で `make all` と `make test` を `push` / `pull_request` ごとに実行します.
+GitHub Actions は [.github/workflows/ci.yml](.github/workflows/ci.yml) で `make all` と `make test` を `push` / `pull_request` ごとに実行します。
