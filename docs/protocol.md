@@ -159,7 +159,29 @@ percentile の算出は nearest-rank を使う。sample 数が 1 の場合は `p
 | dup_cnt | 同一 seq を持つフレームを受信した回数 |
 | reord_cnt | seq が前回より小さいフレームを受信した回数（逆順到着の推定） |
 
-## 12. 設計判断
+## 12. W05 Link FSM
+
+`rx` は W05 で link 状態を `Normal / Degraded / Recover` の 3 状態として扱う。状態遷移 CSV はまだ追加せず、現時点では `rx.log` に人間可読ログを残す。
+
+固定閾値:
+
+| 項目 | 値 | 意味 |
+|------|---:|------|
+| Degraded detect threshold | 2 windows | 1 秒窓で `recv_ok == 0` が 2 窓連続したら `Normal -> Degraded` |
+| Recover completion threshold | 2 windows | `Recover` 中に `recv_ok > 0` の 1 秒窓が 2 窓連続したら `Recover -> Normal` |
+
+遷移ルール:
+
+| 遷移 | 条件 |
+|------|------|
+| `Normal -> Degraded` | `recv_ok == 0` の 1 秒窓が 2 回連続 |
+| `Degraded -> Recover` | `Degraded` 中に正常 frame (`recv_ok`) を再受信 |
+| `Recover -> Normal` | `recv_ok > 0` の 1 秒窓が 2 回連続 |
+| `Recover -> Degraded` | `Recover` 中に `recv_ok == 0` の 1 秒窓が発生 |
+
+`rx.log` の起動時に active threshold を出し、各遷移は `link_state Normal -> Degraded ...` の形式で記録する。run 終了時点の最終窓では、新しい `Degraded` 判定だけを抑止して shutdown 直前の不要な bounce を避ける。
+
+## 13. 設計判断
 
 ### preamble 長（4 bytes）
 
