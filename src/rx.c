@@ -19,6 +19,7 @@
 #include "frame_v1_wire.h"
 
 static int now_process_cpu_ns(uint64_t *out_ns);
+static void normalize_trial_summary_link_name(const char *link_name, char *out, size_t out_size);
 
 static volatile sig_atomic_t g_stop_requested = 0;
 
@@ -54,6 +55,7 @@ typedef struct {
     bool has_trial;        // --trial が明示指定されたか
     const char *csv_in_1sec_log_path;  // １秒ごとの統計ログ（rx_stats）をCSV形式で出力する場合のファイルパス（オプション、未指定ならCSV出力しない）
     const char *csv_by_1recv_log_path;  // 受信ごとの統計ログ（rx_stats）をCSV形式で出力する場合のファイルパス（オプション、未指定ならCSV出力しない）
+    const char *state_log_path;  // FSM 状態遷移をCSV形式で出力する場合のファイルパス（オプション、未指定ならCSV出力しない）
     int crc32_test_mode;  // ハードコードした v1 フレームで CRC32 を確認する
 } RxConfig;
 
@@ -61,6 +63,7 @@ typedef struct {
     FILE *log_fp;
     FILE *csv_in_1sec_fp;
     FILE *csv_by_1recv_fp;
+    FILE *state_fp;
 } RxFiles;
 
 typedef struct {
@@ -157,7 +160,7 @@ typedef enum {
 
 static void print_usage(const char *prog) {
     fprintf(stderr,
-            "Usage: %s --bind-ip <ip> --port <port> --duration-sec <sec> --log-path <path> [--link-name <name>] [--trial <n>] [--csv-in-1sec-log-path <path>] [--csv-by-1recv-log-path <path>] [--crc32-test]\n",
+            "Usage: %s --bind-ip <ip> --port <port> --duration-sec <sec> --log-path <path> [--link-name <name>] [--trial <n>] [--csv-in-1sec-log-path <path>] [--csv-by-1recv-log-path <path>] [--state-log-path <path>] [--crc32-test]\n",
             prog);
 }
 
@@ -184,7 +187,8 @@ static int parse_args(int argc, char **argv, RxConfig *cfg) {
         {"trial", required_argument, 0, 6},
         {"csv-in-1sec-log-path", required_argument, 0, 7},
         {"csv-by-1recv-log-path", required_argument, 0, 8},
-        {"crc32-test", no_argument, 0, 9},
+        {"state-log-path", required_argument, 0, 9},
+        {"crc32-test", no_argument, 0, 10},
         {0, 0, 0, 0}
     };
 
@@ -236,6 +240,9 @@ static int parse_args(int argc, char **argv, RxConfig *cfg) {
                 cfg->csv_by_1recv_log_path = optarg;
                 break;
             case 9:
+                cfg->state_log_path = optarg;
+                break;
+            case 10:
                 cfg->crc32_test_mode = 1;
                 break;
 
@@ -270,6 +277,10 @@ static void close_output_files(RxFiles *files) {
         fclose(files->csv_by_1recv_fp);
         files->csv_by_1recv_fp = NULL;
     }
+    if (files->state_fp) {
+        fclose(files->state_fp);
+        files->state_fp = NULL;
+    }
 }
 
 static int open_output_files(const RxConfig *config, RxFiles *files) {
@@ -299,6 +310,17 @@ static int open_output_files(const RxConfig *config, RxFiles *files) {
         }
         fprintf(files->csv_by_1recv_fp, "rcv_time_ns,seq,send_time_ns,latency_ns,missing_delta,parse_status\n");
         fflush(files->csv_by_1recv_fp);
+    }
+
+    if (config->state_log_path) {
+        files->state_fp = fopen(config->state_log_path, "w");
+        if (!files->state_fp) {
+            perror("fopen(state_log_path)");
+            close_output_files(files);
+            return -1;
+        }
+        fprintf(files->state_fp, "link_name,trial,mono_ns,elapsed_ms,from_state,to_state,reason\n");
+        fflush(files->state_fp);
     }
 
     return 0;
@@ -388,8 +410,47 @@ static void write_fsm_transition_log(
     write_log_line(files->log_fp, "INFO", msg);
 }
 
+static void write_fsm_transition_csv(
+    const RxFiles *files,
+    const RxConfig *config,
+    RxLinkState from_state,
+    RxLinkState to_state,
+    uint64_t t_start_ns,
+    uint64_t event_ns,
+    const char *reason
+) {
+    char link_name_token[128];
+    uint64_t elapsed_ms = 0;
+
+    if (!files || !files->state_fp || !config || !reason) {
+        return;
+    }
+    if (!config->has_link_name || !config->has_trial) {
+        return;
+    }
+
+    normalize_trial_summary_link_name(config->link_name, link_name_token, sizeof(link_name_token));
+    if (event_ns >= t_start_ns) {
+        elapsed_ms = (event_ns - t_start_ns) / UINT64_C(1000000);
+    }
+
+    fprintf(
+        files->state_fp,
+        "%s,%d,%" PRIu64 ",%" PRIu64 ",%s,%s,%s\n",
+        link_name_token,
+        config->trial,
+        event_ns,
+        elapsed_ms,
+        rx_link_state_name(from_state),
+        rx_link_state_name(to_state),
+        reason
+    );
+    fflush(files->state_fp);
+}
+
 static void transition_link_state(
     const RxFiles *files,
+    const RxConfig *config,
     RxLinkFsm *fsm,
     RxLinkState next_state,
     uint64_t t_start_ns,
@@ -413,6 +474,15 @@ static void transition_link_state(
         fsm->consecutive_empty_windows,
         fsm->consecutive_good_windows,
         recv_ok_in_window,
+        reason
+    );
+    write_fsm_transition_csv(
+        files,
+        config,
+        prev_state,
+        next_state,
+        t_start_ns,
+        event_ns,
         reason
     );
 
@@ -974,13 +1044,14 @@ static void write_log_per_1sec(const RxFiles *files, RxTimingState *ts, WindowSt
     }
 }
 
-static void on_recv_ok_for_fsm(const RxFiles *files, RxTimingState *ts, RxLinkFsm *fsm, uint64_t recv_ok_in_window) {
-    if (!files || !ts || !fsm) {
+static void on_recv_ok_for_fsm(const RxFiles *files, const RxConfig *config, RxTimingState *ts, RxLinkFsm *fsm, uint64_t recv_ok_in_window) {
+    if (!files || !config || !ts || !fsm) {
         return;
     }
     if (fsm->state == RX_LINK_STATE_DEGRADED) {
         transition_link_state(
             files,
+            config,
             fsm,
             RX_LINK_STATE_RECOVER,
             ts->t_start_ns,
@@ -1016,6 +1087,7 @@ static void evaluate_fsm_window(
         if (fsm->state == RX_LINK_STATE_RECOVER && allow_degraded_transition) {
             transition_link_state(
                 files,
+                config,
                 fsm,
                 RX_LINK_STATE_DEGRADED,
                 ts->t_start_ns,
@@ -1030,6 +1102,7 @@ static void evaluate_fsm_window(
             allow_degraded_transition) {
             transition_link_state(
                 files,
+                config,
                 fsm,
                 RX_LINK_STATE_DEGRADED,
                 ts->t_start_ns,
@@ -1047,6 +1120,7 @@ static void evaluate_fsm_window(
         if (fsm->consecutive_good_windows >= RX_FSM_RECOVER_GOOD_WINDOWS) {
             transition_link_state(
                 files,
+                config,
                 fsm,
                 RX_LINK_STATE_NORMAL,
                 ts->t_start_ns,
@@ -1282,7 +1356,7 @@ int main(int argc, char **argv) {
 
                 totals.recv_ok++;
                 win->recv_ok++;
-                on_recv_ok_for_fsm(&files, &ts, &link_fsm, win->recv_ok);
+                on_recv_ok_for_fsm(&files, &cfg, &ts, &link_fsm, win->recv_ok);
             }
         }
 

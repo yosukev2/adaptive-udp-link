@@ -161,7 +161,7 @@ percentile の算出は nearest-rank を使う。sample 数が 1 の場合は `p
 
 ## 12. W05 Link FSM
 
-`rx` は W05 で link 状態を `Normal / Degraded / Recover` の 3 状態として扱う。状態遷移 CSV はまだ追加せず、現時点では `rx.log` に人間可読ログを残す。
+`rx` は W05 で link 状態を `Normal / Degraded / Recover` の 3 状態として扱う。状態遷移は `rx.log` の人間可読ログに加えて、`--state-log-path` で固定形式 CSV としても出力できる。
 
 固定閾値:
 
@@ -181,7 +181,29 @@ percentile の算出は nearest-rank を使う。sample 数が 1 の場合は `p
 
 `rx.log` の起動時に active threshold を出し、各遷移は `link_state Normal -> Degraded ...` の形式で記録する。run 終了時点の最終窓では、新しい `Degraded` 判定だけを抑止して shutdown 直前の不要な bounce を避ける。
 
-## 13. 設計判断
+## 13. 状態遷移 CSV
+
+`--state-log-path` を指定した場合、FSM 遷移ごとに 1 行だけ出力する。
+
+CSV の列順は固定で、次の通り。
+
+```text
+link_name,trial,mono_ns,elapsed_ms,from_state,to_state,reason
+```
+
+| 列 | 意味 |
+|----|------|
+| link_name | 比較対象の link 識別子。`--link-name` を token 化した値を出す。 |
+| trial | 同一条件内の試行番号。`--trial` をそのまま出す。 |
+| mono_ns | 遷移イベントの `CLOCK_MONOTONIC` 時刻（ns）。 |
+| elapsed_ms | trial 開始から遷移時点までの経過時間（ms）。 |
+| from_state | 遷移前の状態。 |
+| to_state | 遷移後の状態。 |
+| reason | 遷移理由。`rx.log` の `reason=` と同じ値を出す。 |
+
+状態遷移 CSV は実際に状態が変わったときだけ出力するため、同一 state への重複行は出ない。
+
+## 14. 設計判断
 
 ### preamble 長（4 bytes）
 
