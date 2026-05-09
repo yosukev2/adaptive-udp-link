@@ -1,0 +1,4 @@
+trial,link_name,rate_hz,duration_sec,payload_len,tx_frames_per_datagram,recv_ok,gap_est,crc_fail,len_invalid,preamble_miss,resync_count,latency_p95_ms,latency_p99_ms,latency_max_ms,avg_pps,avg_cpu_pct,p99_deviation_pct_from_mean,reproducible
+1,host_loopback,120,5,64,3,603,0,0,0,0,0,0.235,0.385,1.515,28.71,0.28,6.94,yes
+2,host_loopback,120,5,64,3,603,0,0,0,0,0,0.271,0.360,0.429,28.71,0.29,0.00,yes
+3,host_loopback,120,5,64,3,603,0,0,0,0,0,0.243,0.335,0.489,28.71,0.27,6.94,yes

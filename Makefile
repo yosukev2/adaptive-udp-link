@@ -77,8 +77,9 @@ $(TEST_FRAMER): $(SRC_DIR)/test_framer.c $(FRAME_V1_WIRE) | $(BIN_DIR)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 # テスト実行（ビルド→実行）
-test: $(TEST_FRAMER)
+test: all $(TEST_FRAMER)
 	$(TEST_FRAMER)
+	bash scripts/test_loopback_metrics.sh
 
 # 10秒実行のショートカット
 # 「make run10」で、ビルド→実行スクリプトの順に動く

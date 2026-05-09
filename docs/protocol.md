@@ -101,7 +101,7 @@ flags は判定に用いない。
 Host と MCU/実リンクで同じ列順を使うため、受信側は `--link-name` と `--trial` の両方が与えられた trial 終了時に、以下の 1 行 summary を出す。
 
 ```text
-trial_summary link_name=<token> trial=<n> duration_sec=<sec> sent=<n|na> recv_ok=<n> gap_est=<n> crc_fail=<n> len_invalid=<n> preamble_miss=<n> resync_count=<n> latency_p50_ms=<value> latency_p95_ms=<value> latency_max_ms=<value>
+trial_summary link_name=<token> trial=<n> duration_sec=<sec> sent=<n|na> recv_ok=<n> gap_est=<n> crc_fail=<n> len_invalid=<n> preamble_miss=<n> resync_count=<n> latency_p50_ms=<value> latency_p95_ms=<value> latency_p99_ms=<value> latency_max_ms=<value>
 ```
 
 列順は固定で、順番を入れ替えない。どちらかの metadata が欠ける run では、誤った trial 識別子を出さないため `trial_summary` を出力しない。
@@ -120,13 +120,32 @@ trial_summary link_name=<token> trial=<n> duration_sec=<sec> sent=<n|na> recv_ok
 | resync_count | 受信側が次の preamble を探し直した回数。 |
 | latency_p50_ms | 正常受信 frame の latency p50。`recv_ok` に数えた frame のうち、`tx_ts <= recv_now` で latency を確定できたものだけを候補にする。sample 数が 0 の run、または `future_ts` が混じって `recv_ok` 全体を代表できない run では `na` を出す。 |
 | latency_p95_ms | 正常受信 frame の latency p95。`recv_ok` に数えた frame のうち、`tx_ts <= recv_now` で latency を確定できたものだけを候補にする。sample 数が 0 の run、または `future_ts` が混じって `recv_ok` 全体を代表できない run では `na` を出す。 |
+| latency_p99_ms | 正常受信 frame の latency p99。`recv_ok` に数えた frame のうち、`tx_ts <= recv_now` で latency を確定できたものだけを候補にする。sample 数が 0 の run、または `future_ts` が混じって `recv_ok` 全体を代表できない run では `na` を出す。 |
 | latency_max_ms | 正常受信 frame の latency max。`recv_ok` に数えた frame のうち、`tx_ts <= recv_now` で latency を確定できたものだけを候補にする。sample 数が 0 の run、または `future_ts` が混じって `recv_ok` 全体を代表できない run では `na` を出す。 |
 
 `trial_summary` は列順と意味を固定するための summary であり、既存の `rx summary` は補助ログとして残してよい。
 
-percentile の算出は nearest-rank を使う。sample 数が 1 の場合は `p50 = p95 = max` になり、偶数個でも中央値補間はしない。percentile 用サンプルは `trial_summary` を出す run でだけ保持する。
+percentile の算出は nearest-rank を使う。sample 数が 1 の場合は `p50 = p95 = p99 = max` になり、偶数個でも中央値補間はしない。percentile 用サンプルは `trial_summary` を出す run でだけ保持する。
 
-## 10. 受信ループの統計カウンタ
+## 10. 1秒統計の固定列
+
+受信側の `rx_stats` と `rx_in_1sec.csv`、送信側の `tx_stats` は 1 秒単位の補助観測として扱う。`pps` は UDP datagram/s、`cpu_pct` は直前 1 秒窓での process CPU time を wall clock で割った値（%）とする。
+
+| 列 | 意味 |
+|----|------|
+| elapsed_sec | trial 開始から何秒目の統計か。 |
+| avg_latency_ms | その 1 秒窓で確定できた latency の平均。 |
+| max_latency_ms | その 1 秒窓で確定できた latency の最大。 |
+| min_latency_ms | その 1 秒窓で確定できた latency の最小。 |
+| recv_cnt | その 1 秒窓で `recvfrom()` に成功した datagram 数。 |
+| ok_recv_cnt | その 1 秒窓で正常 decode できた frame 数。 |
+| gap_cnt | その 1 秒窓で推定した欠落 frame 数。 |
+| dup_cnt | その 1 秒窓で観測した duplicate frame 数。 |
+| reord_cnt | その 1 秒窓で観測した reorder frame 数。 |
+| pps | `recv_cnt / window_sec` または `sent_datagrams / window_sec`。単位は packets per second。 |
+| cpu_pct | `CLOCK_PROCESS_CPUTIME_ID` の増分を window 秒で割った process CPU 使用率。 |
+
+## 11. 受信ループの統計カウンタ
 
 | カウンタ | 意味 |
 |---------|------|
@@ -140,7 +159,7 @@ percentile の算出は nearest-rank を使う。sample 数が 1 の場合は `p
 | dup_cnt | 同一 seq を持つフレームを受信した回数 |
 | reord_cnt | seq が前回より小さいフレームを受信した回数（逆順到着の推定） |
 
-## 11. 設計判断
+## 12. 設計判断
 
 ### preamble 長（4 bytes）
 
