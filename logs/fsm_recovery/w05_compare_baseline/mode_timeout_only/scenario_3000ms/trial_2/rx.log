@@ -1,0 +1,19 @@
+2026-05-09 20:01:56 [INFO] frame_v1 config version=1 header_len=25 payload_max=1024 frame_max=1049 stream_buf_cap=4196
+2026-05-09 20:01:56 [INFO] rx start bind=127.0.0.1:9707 duration_sec=9
+2026-05-09 20:01:56 [INFO] rx recovery_mode=timeout-only
+2026-05-09 20:01:56 [INFO] link_fsm mode=timeout-only initial=Normal degraded_detect=recv_ok_zero_for_2_windows recover_complete=recv_ok_positive_for_2_windows
+2026-05-09 20:01:57 [INFO] rx_stats elapsed_sec=1 avg_latency=0.000 max_latency=0.000 min_latency=0.000 recv_cnt=0 ok_recv_cnt=0 gap_cnt=0 dup_cnt=0 reord_cnt=0 pps=0.00 cpu_pct=0.00
+2026-05-09 20:01:58 [INFO] rx_stats elapsed_sec=2 avg_latency=0.172 max_latency=0.243 min_latency=0.117 recv_cnt=10 ok_recv_cnt=30 gap_cnt=0 dup_cnt=0 reord_cnt=0 pps=10.00 cpu_pct=0.04
+2026-05-09 20:01:59 [INFO] rx_stats elapsed_sec=3 avg_latency=0.373 max_latency=2.347 min_latency=0.102 recv_cnt=10 ok_recv_cnt=30 gap_cnt=0 dup_cnt=0 reord_cnt=0 pps=10.00 cpu_pct=0.04
+2026-05-09 20:02:00 [INFO] rx_stats elapsed_sec=4 avg_latency=0.000 max_latency=0.000 min_latency=0.000 recv_cnt=0 ok_recv_cnt=0 gap_cnt=0 dup_cnt=0 reord_cnt=0 pps=0.00 cpu_pct=0.01
+2026-05-09 20:02:01 [INFO] link_state Normal -> Degraded since_start_ms=5000 reason=no_recv_ok_for_threshold_windows empty_windows=2 good_windows=0 recv_ok_in_window=0
+2026-05-09 20:02:01 [INFO] rx_stats elapsed_sec=5 avg_latency=0.000 max_latency=0.000 min_latency=0.000 recv_cnt=0 ok_recv_cnt=0 gap_cnt=0 dup_cnt=0 reord_cnt=0 pps=0.00 cpu_pct=0.01
+2026-05-09 20:02:02 [INFO] rx_stats elapsed_sec=6 avg_latency=0.000 max_latency=0.000 min_latency=0.000 recv_cnt=0 ok_recv_cnt=0 gap_cnt=0 dup_cnt=0 reord_cnt=0 pps=0.00 cpu_pct=0.01
+2026-05-09 20:02:03 [INFO] rx_stats elapsed_sec=7 avg_latency=0.250 max_latency=0.591 min_latency=0.130 recv_cnt=10 ok_recv_cnt=30 gap_cnt=0 dup_cnt=0 reord_cnt=0 pps=10.00 cpu_pct=0.05
+2026-05-09 20:02:04 [INFO] link_state Degraded -> Normal since_start_ms=8000 reason=timeout_only_recovered_by_healthy_windows empty_windows=0 good_windows=2 recv_ok_in_window=30
+2026-05-09 20:02:04 [INFO] rx_stats elapsed_sec=8 avg_latency=0.240 max_latency=0.682 min_latency=0.106 recv_cnt=10 ok_recv_cnt=30 gap_cnt=0 dup_cnt=0 reord_cnt=0 pps=10.00 cpu_pct=0.05
+2026-05-09 20:02:05 [INFO] rx_stats elapsed_sec=9 avg_latency=1.353 max_latency=1.353 min_latency=1.353 recv_cnt=1 ok_recv_cnt=3 gap_cnt=0 dup_cnt=0 reord_cnt=0 pps=1.00 cpu_pct=0.01
+2026-05-09 20:02:05 [INFO] duration elapsed, exiting
+2026-05-09 20:02:05 [INFO] rx summary recv_any=41 recv_ok=123 bad_size=0 bad_header=0 bad_crc=0 resync_count=0 preamble_miss=0 crc_fail=0 len_invalid=0 poll_timeout=7 elapsed_ms=9002 avg_latency_ms=0.285 max_latency_ms=2 min_latency_ms=0 gap_cnt=0 dup_cnt=0 reord_cnt=0 future_ts_cnt=0 future_ts_detected=0
+2026-05-09 20:02:05 [INFO] trial_summary link_name=host_loopback trial=2 duration_sec=9 sent=na recv_ok=123 gap_est=0 crc_fail=0 len_invalid=0 preamble_miss=0 resync_count=0 latency_p50_ms=0.177 latency_p95_ms=0.682 latency_p99_ms=2.347 latency_max_ms=2.347
+2026-05-09 20:02:05 [INFO] rx end
