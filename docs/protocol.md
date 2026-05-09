@@ -163,6 +163,8 @@ percentile の算出は nearest-rank を使う。sample 数が 1 の場合は `p
 
 `rx` は W05 で link 状態を `Normal / Degraded / Recover` の 3 状態として扱う。状態遷移は `rx.log` の人間可読ログに加えて、`--state-log-path` で固定形式 CSV としても出力できる。
 
+`rx` は `--recovery-mode fsm|timeout-only` で復旧の扱いを切り替えられる。どちらの mode でも state transition CSV の列順は同じで、`--state-log-path` を指定すれば同じファイル形式で取得できる。
+
 固定閾値:
 
 | 項目 | 値 | 意味 |
@@ -180,6 +182,15 @@ percentile の算出は nearest-rank を使う。sample 数が 1 の場合は `p
 | `Recover -> Degraded` | `Recover` 中に `recv_ok == 0` の 1 秒窓が発生 |
 
 `rx.log` の起動時に active threshold を出し、各遷移は `link_state Normal -> Degraded ...` の形式で記録する。run 終了時点の最終窓では、新しい `Degraded` 判定だけを抑止して shutdown 直前の不要な bounce を避ける。
+
+mode ごとの差分:
+
+| mode | 挙動 |
+|------|------|
+| `fsm` | `Degraded` から最初の正常 frame で `Recover` に入り、2 つの healthy windows で `Normal` に戻る。 |
+| `timeout-only` | `Recover` に入らず、`Degraded` のまま healthy windows を数えて 2 つ連続したら直接 `Normal` に戻る。 |
+
+`timeout-only` でも CSV の列は同じで、`from_state=Degraded` / `to_state=Normal` の遷移として記録される。`Recover` 状態は出ない。
 
 ## 13. 状態遷移 CSV
 
