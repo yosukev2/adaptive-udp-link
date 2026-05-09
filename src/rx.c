@@ -127,6 +127,21 @@ typedef struct {
     WindowStats win_stats[2];
 } RxTimingState;
 
+typedef enum {
+    RX_LINK_STATE_NORMAL = 0,
+    RX_LINK_STATE_DEGRADED = 1,
+    RX_LINK_STATE_RECOVER = 2,
+} RxLinkState;
+
+typedef struct {
+    RxLinkState state;
+    uint64_t consecutive_empty_windows;
+    uint64_t consecutive_good_windows;
+} RxLinkFsm;
+
+#define RX_FSM_DEGRADED_EMPTY_WINDOWS UINT64_C(2)
+#define RX_FSM_RECOVER_GOOD_WINDOWS UINT64_C(2)
+
 #define RX_STREAM_BUF_CAP (FRAME_V1_MAX_WIRE_BYTES * 4)
 
 typedef struct {
@@ -301,6 +316,122 @@ static void write_log_line(FILE *fp, const char *level, const char *msg) {
     strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &tmv);
     fprintf(fp, "%s [%s] %s\n", ts, level, msg);
     fflush(fp);
+}
+
+static const char *rx_link_state_name(RxLinkState state) {
+    switch (state) {
+        case RX_LINK_STATE_NORMAL:
+            return "Normal";
+        case RX_LINK_STATE_DEGRADED:
+            return "Degraded";
+        case RX_LINK_STATE_RECOVER:
+            return "Recover";
+        default:
+            return "Unknown";
+    }
+}
+
+static void write_fsm_threshold_log(const RxFiles *files, RxLinkState initial_state) {
+    char msg[256];
+
+    if (!files || !files->log_fp) {
+        return;
+    }
+
+    snprintf(
+        msg,
+        sizeof(msg),
+        "link_fsm initial=%s degraded_detect=recv_ok_zero_for_%" PRIu64
+        "_windows recover_complete=recv_ok_positive_for_%" PRIu64 "_windows",
+        rx_link_state_name(initial_state),
+        RX_FSM_DEGRADED_EMPTY_WINDOWS,
+        RX_FSM_RECOVER_GOOD_WINDOWS
+    );
+    write_log_line(files->log_fp, "INFO", msg);
+}
+
+static void write_fsm_transition_log(
+    const RxFiles *files,
+    RxLinkState from_state,
+    RxLinkState to_state,
+    uint64_t t_start_ns,
+    uint64_t event_ns,
+    uint64_t empty_windows,
+    uint64_t good_windows,
+    uint64_t recv_ok_in_window,
+    const char *reason
+) {
+    char msg[256];
+    uint64_t since_start_ms = 0;
+
+    if (!files || !files->log_fp || !reason) {
+        return;
+    }
+    if (event_ns >= t_start_ns) {
+        since_start_ms = (event_ns - t_start_ns) / UINT64_C(1000000);
+    }
+
+    snprintf(
+        msg,
+        sizeof(msg),
+        "link_state %s -> %s since_start_ms=%" PRIu64
+        " reason=%s empty_windows=%" PRIu64
+        " good_windows=%" PRIu64 " recv_ok_in_window=%" PRIu64,
+        rx_link_state_name(from_state),
+        rx_link_state_name(to_state),
+        since_start_ms,
+        reason,
+        empty_windows,
+        good_windows,
+        recv_ok_in_window
+    );
+    write_log_line(files->log_fp, "INFO", msg);
+}
+
+static void transition_link_state(
+    const RxFiles *files,
+    RxLinkFsm *fsm,
+    RxLinkState next_state,
+    uint64_t t_start_ns,
+    uint64_t event_ns,
+    uint64_t recv_ok_in_window,
+    const char *reason
+) {
+    RxLinkState prev_state;
+
+    if (!fsm || fsm->state == next_state) {
+        return;
+    }
+
+    prev_state = fsm->state;
+    write_fsm_transition_log(
+        files,
+        prev_state,
+        next_state,
+        t_start_ns,
+        event_ns,
+        fsm->consecutive_empty_windows,
+        fsm->consecutive_good_windows,
+        recv_ok_in_window,
+        reason
+    );
+
+    fsm->state = next_state;
+    switch (next_state) {
+        case RX_LINK_STATE_NORMAL:
+            fsm->consecutive_empty_windows = 0;
+            fsm->consecutive_good_windows = 0;
+            break;
+        case RX_LINK_STATE_DEGRADED:
+            fsm->consecutive_good_windows = 0;
+            break;
+        case RX_LINK_STATE_RECOVER:
+            fsm->consecutive_empty_windows = 0;
+            fsm->consecutive_good_windows = 0;
+            break;
+        default:
+            break;
+    }
 }
 
 static void write_summary(const RxFiles *files, const RxTotals *totals, uint64_t elapsed_ns) {
@@ -843,6 +974,93 @@ static void write_log_per_1sec(const RxFiles *files, RxTimingState *ts, WindowSt
     }
 }
 
+static void on_recv_ok_for_fsm(const RxFiles *files, RxTimingState *ts, RxLinkFsm *fsm, uint64_t recv_ok_in_window) {
+    if (!files || !ts || !fsm) {
+        return;
+    }
+    if (fsm->state == RX_LINK_STATE_DEGRADED) {
+        transition_link_state(
+            files,
+            fsm,
+            RX_LINK_STATE_RECOVER,
+            ts->t_start_ns,
+            ts->recv_now_ns,
+            recv_ok_in_window,
+            "recv_ok_resumed"
+        );
+    }
+}
+
+static void evaluate_fsm_window(
+    const RxFiles *files,
+    const RxConfig *config,
+    const RxTimingState *ts,
+    const WindowStats *win,
+    RxLinkFsm *fsm,
+    uint64_t window_end_ns
+) {
+    uint64_t run_end_ns = 0;
+    bool allow_degraded_transition = false;
+
+    if (!files || !config || !ts || !win || !fsm) {
+        return;
+    }
+
+    run_end_ns = ts->t_start_ns + (uint64_t)config->duration_sec * UINT64_C(1000000000);
+    allow_degraded_transition = window_end_ns < run_end_ns;
+
+    if (win->recv_ok == 0) {
+        fsm->consecutive_empty_windows++;
+        fsm->consecutive_good_windows = 0;
+
+        if (fsm->state == RX_LINK_STATE_RECOVER && allow_degraded_transition) {
+            transition_link_state(
+                files,
+                fsm,
+                RX_LINK_STATE_DEGRADED,
+                ts->t_start_ns,
+                window_end_ns,
+                win->recv_ok,
+                "recovery_interrupted_by_empty_window"
+            );
+            return;
+        }
+        if (fsm->state == RX_LINK_STATE_NORMAL &&
+            fsm->consecutive_empty_windows >= RX_FSM_DEGRADED_EMPTY_WINDOWS &&
+            allow_degraded_transition) {
+            transition_link_state(
+                files,
+                fsm,
+                RX_LINK_STATE_DEGRADED,
+                ts->t_start_ns,
+                window_end_ns,
+                win->recv_ok,
+                "no_recv_ok_for_threshold_windows"
+            );
+        }
+        return;
+    }
+
+    fsm->consecutive_empty_windows = 0;
+    if (fsm->state == RX_LINK_STATE_RECOVER) {
+        fsm->consecutive_good_windows++;
+        if (fsm->consecutive_good_windows >= RX_FSM_RECOVER_GOOD_WINDOWS) {
+            transition_link_state(
+                files,
+                fsm,
+                RX_LINK_STATE_NORMAL,
+                ts->t_start_ns,
+                window_end_ns,
+                win->recv_ok,
+                "recover_completed_by_healthy_windows"
+            );
+        }
+        return;
+    }
+
+    fsm->consecutive_good_windows = 0;
+}
+
 static int run_crc32_test_mode(void) {
     FrameV1Header frame = {0};
     uint8_t frame_bytes[FRAME_V1_MAX_WIRE_BYTES] = {0};
@@ -867,6 +1085,9 @@ int main(int argc, char **argv) {
     RxTotals totals = {0};
     RxTimingState ts = {0};
     SeqState seq_state = {0};
+    RxLinkFsm link_fsm = {
+        .state = RX_LINK_STATE_NORMAL,
+    };
     WindowStats *win = NULL;
 
     cfg.bind_ip = "0.0.0.0";
@@ -909,6 +1130,7 @@ int main(int argc, char **argv) {
                 "rx start bind=%s:%d duration_sec=%d",
                 cfg.bind_ip, cfg.port, cfg.duration_sec);
         write_log_line(files.log_fp, "INFO", buf);
+        write_fsm_threshold_log(&files, link_fsm.state);
     }
 
     printf("rx started: bind=%s:%d duration=%d log=%s\n", cfg.bind_ip, cfg.port, cfg.duration_sec, cfg.log_path);
@@ -1060,6 +1282,7 @@ int main(int argc, char **argv) {
 
                 totals.recv_ok++;
                 win->recv_ok++;
+                on_recv_ok_for_fsm(&files, &ts, &link_fsm, win->recv_ok);
             }
         }
 
@@ -1069,6 +1292,7 @@ int main(int argc, char **argv) {
         }
         while (ts.now_for_stats_ns >= ts.next_stats_ns) {
             ts.cur_idx = ts.win_idx % 2;
+            evaluate_fsm_window(&files, &cfg, &ts, &ts.win_stats[ts.cur_idx], &link_fsm, ts.next_stats_ns);
             write_log_per_1sec(&files, &ts, &ts.win_stats[ts.cur_idx]);
 
             ts.next_stats_ns += 1000000000ULL;
