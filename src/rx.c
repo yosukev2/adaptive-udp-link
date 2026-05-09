@@ -56,6 +56,7 @@ typedef struct {
     const char *csv_in_1sec_log_path;  // １秒ごとの統計ログ（rx_stats）をCSV形式で出力する場合のファイルパス（オプション、未指定ならCSV出力しない）
     const char *csv_by_1recv_log_path;  // 受信ごとの統計ログ（rx_stats）をCSV形式で出力する場合のファイルパス（オプション、未指定ならCSV出力しない）
     const char *state_log_path;  // FSM 状態遷移をCSV形式で出力する場合のファイルパス（オプション、未指定ならCSV出力しない）
+    int recovery_mode;  // W05 の復旧モード（0=fsm, 1=timeout-only）
     int crc32_test_mode;  // ハードコードした v1 フレームで CRC32 を確認する
 } RxConfig;
 
@@ -142,6 +143,11 @@ typedef struct {
     uint64_t consecutive_good_windows;
 } RxLinkFsm;
 
+typedef enum {
+    RX_RECOVERY_MODE_FSM = 0,
+    RX_RECOVERY_MODE_TIMEOUT_ONLY = 1,
+} RxRecoveryMode;
+
 #define RX_FSM_DEGRADED_EMPTY_WINDOWS UINT64_C(2)
 #define RX_FSM_RECOVER_GOOD_WINDOWS UINT64_C(2)
 
@@ -160,7 +166,7 @@ typedef enum {
 
 static void print_usage(const char *prog) {
     fprintf(stderr,
-            "Usage: %s --bind-ip <ip> --port <port> --duration-sec <sec> --log-path <path> [--link-name <name>] [--trial <n>] [--csv-in-1sec-log-path <path>] [--csv-by-1recv-log-path <path>] [--state-log-path <path>] [--crc32-test]\n",
+            "Usage: %s --bind-ip <ip> --port <port> --duration-sec <sec> --log-path <path> [--link-name <name>] [--trial <n>] [--csv-in-1sec-log-path <path>] [--csv-by-1recv-log-path <path>] [--state-log-path <path>] [--recovery-mode fsm|timeout-only] [--crc32-test]\n",
             prog);
 }
 
@@ -172,6 +178,21 @@ static int parse_int(const char *s, int *out) {
     if (v < -2147483648L || v > 2147483647L) return -1;
     *out = (int)v;
     return 0;
+}
+
+static int parse_recovery_mode(const char *s, int *out) {
+    if (!s || !out) {
+        return -1;
+    }
+    if (strcmp(s, "fsm") == 0) {
+        *out = RX_RECOVERY_MODE_FSM;
+        return 0;
+    }
+    if (strcmp(s, "timeout-only") == 0) {
+        *out = RX_RECOVERY_MODE_TIMEOUT_ONLY;
+        return 0;
+    }
+    return -1;
 }
 
 static int parse_args(int argc, char **argv, RxConfig *cfg) {
@@ -188,7 +209,8 @@ static int parse_args(int argc, char **argv, RxConfig *cfg) {
         {"csv-in-1sec-log-path", required_argument, 0, 7},
         {"csv-by-1recv-log-path", required_argument, 0, 8},
         {"state-log-path", required_argument, 0, 9},
-        {"crc32-test", no_argument, 0, 10},
+        {"recovery-mode", required_argument, 0, 10},
+        {"crc32-test", no_argument, 0, 11},
         {0, 0, 0, 0}
     };
 
@@ -243,6 +265,13 @@ static int parse_args(int argc, char **argv, RxConfig *cfg) {
                 cfg->state_log_path = optarg;
                 break;
             case 10:
+                if (parse_recovery_mode(optarg, &cfg->recovery_mode) != 0) {
+                    fprintf(stderr, "Invalid --recovery-mode: %s (expected fsm|timeout-only)\n", optarg);
+                    print_usage(argv[0]);
+                    return -1;
+                }
+                break;
+            case 11:
                 cfg->crc32_test_mode = 1;
                 break;
 
@@ -259,6 +288,11 @@ static int parse_args(int argc, char **argv, RxConfig *cfg) {
     if (!cfg->log_path || cfg->port <= 0 || cfg->port > 65535 || cfg->duration_sec <= 0) {
         print_usage(argv[0]);
         return -1;
+    }
+
+    if (cfg->recovery_mode != RX_RECOVERY_MODE_FSM &&
+        cfg->recovery_mode != RX_RECOVERY_MODE_TIMEOUT_ONLY) {
+        cfg->recovery_mode = RX_RECOVERY_MODE_FSM;
     }
 
     return 0;
@@ -353,7 +387,17 @@ static const char *rx_link_state_name(RxLinkState state) {
     }
 }
 
-static void write_fsm_threshold_log(const RxFiles *files, RxLinkState initial_state) {
+static const char *rx_recovery_mode_name(RxRecoveryMode mode) {
+    switch (mode) {
+        case RX_RECOVERY_MODE_TIMEOUT_ONLY:
+            return "timeout-only";
+        case RX_RECOVERY_MODE_FSM:
+        default:
+            return "fsm";
+    }
+}
+
+static void write_fsm_threshold_log(const RxFiles *files, RxRecoveryMode mode, RxLinkState initial_state) {
     char msg[256];
 
     if (!files || !files->log_fp) {
@@ -363,8 +407,9 @@ static void write_fsm_threshold_log(const RxFiles *files, RxLinkState initial_st
     snprintf(
         msg,
         sizeof(msg),
-        "link_fsm initial=%s degraded_detect=recv_ok_zero_for_%" PRIu64
+        "link_fsm mode=%s initial=%s degraded_detect=recv_ok_zero_for_%" PRIu64
         "_windows recover_complete=recv_ok_positive_for_%" PRIu64 "_windows",
+        rx_recovery_mode_name(mode),
         rx_link_state_name(initial_state),
         RX_FSM_DEGRADED_EMPTY_WINDOWS,
         RX_FSM_RECOVER_GOOD_WINDOWS
@@ -1049,16 +1094,18 @@ static void on_recv_ok_for_fsm(const RxFiles *files, const RxConfig *config, RxT
         return;
     }
     if (fsm->state == RX_LINK_STATE_DEGRADED) {
-        transition_link_state(
-            files,
-            config,
-            fsm,
-            RX_LINK_STATE_RECOVER,
-            ts->t_start_ns,
-            ts->recv_now_ns,
-            recv_ok_in_window,
-            "recv_ok_resumed"
-        );
+        if (config->recovery_mode == RX_RECOVERY_MODE_FSM) {
+            transition_link_state(
+                files,
+                config,
+                fsm,
+                RX_LINK_STATE_RECOVER,
+                ts->t_start_ns,
+                ts->recv_now_ns,
+                recv_ok_in_window,
+                "recv_ok_resumed"
+            );
+        }
     }
 }
 
@@ -1127,6 +1174,24 @@ static void evaluate_fsm_window(
                 window_end_ns,
                 win->recv_ok,
                 "recover_completed_by_healthy_windows"
+            );
+        }
+        return;
+    }
+
+    if (fsm->state == RX_LINK_STATE_DEGRADED &&
+        config->recovery_mode == RX_RECOVERY_MODE_TIMEOUT_ONLY) {
+        fsm->consecutive_good_windows++;
+        if (fsm->consecutive_good_windows >= RX_FSM_RECOVER_GOOD_WINDOWS) {
+            transition_link_state(
+                files,
+                config,
+                fsm,
+                RX_LINK_STATE_NORMAL,
+                ts->t_start_ns,
+                window_end_ns,
+                win->recv_ok,
+                "timeout_only_recovered_by_healthy_windows"
             );
         }
         return;
@@ -1204,7 +1269,11 @@ int main(int argc, char **argv) {
                 "rx start bind=%s:%d duration_sec=%d",
                 cfg.bind_ip, cfg.port, cfg.duration_sec);
         write_log_line(files.log_fp, "INFO", buf);
-        write_fsm_threshold_log(&files, link_fsm.state);
+        snprintf(buf, sizeof(buf),
+                 "rx recovery_mode=%s",
+                 (cfg.recovery_mode == RX_RECOVERY_MODE_TIMEOUT_ONLY) ? "timeout-only" : "fsm");
+        write_log_line(files.log_fp, "INFO", buf);
+        write_fsm_threshold_log(&files, cfg.recovery_mode, link_fsm.state);
     }
 
     printf("rx started: bind=%s:%d duration=%d log=%s\n", cfg.bind_ip, cfg.port, cfg.duration_sec, cfg.log_path);
