@@ -62,6 +62,11 @@ typedef struct {
     int crc32_test_mode;        // ハードコードした v1 フレームで CRC32 を確認する
     FaultTarget fault_target;   // 故障注入の対象フィールド（FAULT_NONE = 無効）
     float fault_rate;           // 故障注入確率（0.0〜1.0）
+    int outage_at_sec;          // 単発瞬断の開始時刻（tx 開始からの相対秒）
+    int outage_duration_ms;     // 単発瞬断の継続時間（ms）
+    int outage_at_sec_set;
+    int outage_duration_ms_set;
+    int outage_enabled;
 } TxConfig;
 
 typedef struct {
@@ -87,11 +92,21 @@ typedef struct {
     uint32_t last_sent_frames;
 } TxTimingState;
 
+typedef struct {
+    uint64_t start_ns_from_t0;
+    uint64_t end_ns_from_t0;
+    uint64_t duration_ns;
+    int active;
+    int logged_start;
+    int logged_end;
+} TxOutageState;
+
 static void print_usage(const char *prog) {
     fprintf(stderr,
             "Usage: %s --dst-ip <ip> --dst-port <port> --rate-hz <hz> --duration-sec <sec>"
             " --log-path <path> [--payload-len <n>] [--version <n>] [--crc32-test]"
-            " [--fault-target preamble|payload_len|crc|payload|header] [--fault-rate 0.0-1.0]\n",
+            " [--fault-target preamble|payload_len|crc|payload|header] [--fault-rate 0.0-1.0]"
+            " [--outage-at-sec <sec> --outage-duration-ms <ms>]\n",
             prog);
 }
 
@@ -133,6 +148,8 @@ static int parse_args(int argc, char **argv, TxConfig *cfg) {
         {"payload-len",   required_argument, 0, 8},
         {"fault-target",  required_argument, 0, 9},
         {"fault-rate",    required_argument, 0, 10},
+        {"outage-at-sec", required_argument, 0, 11},
+        {"outage-duration-ms", required_argument, 0, 12},
         {0, 0, 0, 0}
     };
 
@@ -210,6 +227,22 @@ static int parse_args(int argc, char **argv, TxConfig *cfg) {
                     return -1;
                 }
                 break;
+            case 11:
+                if (parse_int(optarg, &cfg->outage_at_sec) != 0) {
+                    fprintf(stderr, "Invalid --outage-at-sec: %s\n", optarg);
+                    print_usage(argv[0]);
+                    return -1;
+                }
+                cfg->outage_at_sec_set = 1;
+                break;
+            case 12:
+                if (parse_int(optarg, &cfg->outage_duration_ms) != 0) {
+                    fprintf(stderr, "Invalid --outage-duration-ms: %s\n", optarg);
+                    print_usage(argv[0]);
+                    return -1;
+                }
+                cfg->outage_duration_ms_set = 1;
+                break;
             default:
                 print_usage(argv[0]);
                 return -1;
@@ -235,6 +268,25 @@ static int parse_args(int argc, char **argv, TxConfig *cfg) {
         fprintf(stderr, "Unsupported --version: %d (expected %u)\n", cfg->version, kFrameV1Version);
         print_usage(argv[0]);
         return -1;
+    }
+
+    if (cfg->outage_at_sec_set != cfg->outage_duration_ms_set) {
+        fprintf(stderr, "--outage-at-sec and --outage-duration-ms must be specified together\n");
+        print_usage(argv[0]);
+        return -1;
+    }
+    if (cfg->outage_at_sec_set) {
+        if (cfg->outage_at_sec < 0) {
+            fprintf(stderr, "Invalid --outage-at-sec: %d (expected >= 0)\n", cfg->outage_at_sec);
+            print_usage(argv[0]);
+            return -1;
+        }
+        if (cfg->outage_duration_ms <= 0) {
+            fprintf(stderr, "Invalid --outage-duration-ms: %d (expected > 0)\n", cfg->outage_duration_ms);
+            print_usage(argv[0]);
+            return -1;
+        }
+        cfg->outage_enabled = 1;
     }
 
     return 0;
@@ -282,7 +334,7 @@ static const char *fault_target_name(FaultTarget t) {
     }
 }
 
-// 故障注入: frame_v1_build() 後の wire バイト列に対して�arget フィールドを破壊する。
+// 故障注入: frame_v1_build() 後の wire バイト列に対して�arget フィールドを破壊する。
 // 確率 rate で注入し、実施した場合はログに記録する。
 static void apply_fault_injection(
     FaultTarget target,
@@ -515,6 +567,7 @@ int main(int argc, char **argv) {
     TxFiles files = {0};
     TxTotals totals = {0};
     TxTimingState ts = {0};
+    TxOutageState outage = {0};
     FrameV1Header frame = {0};
     uint8_t payload[FRAME_V1_PAYLOAD_MAX_BYTES] = {0};
     uint8_t datagram_buf[TX_FRAMES_PER_DATAGRAM * FRAME_V1_MAX_WIRE_BYTES];
@@ -556,6 +609,12 @@ int main(int argc, char **argv) {
             snprintf(buf, sizeof(buf),
                      "fault injection enabled target=%s rate=%.2f",
                      fault_target_name(cfg.fault_target), (double)cfg.fault_rate);
+            write_log_line(files.log_fp, "INFO", buf);
+        }
+        if (cfg.outage_enabled) {
+            snprintf(buf, sizeof(buf),
+                     "outage configured at_sec=%d duration_ms=%d",
+                     cfg.outage_at_sec, cfg.outage_duration_ms);
             write_log_line(files.log_fp, "INFO", buf);
         }
     }
@@ -608,6 +667,11 @@ int main(int argc, char **argv) {
     }
     ts.next_stats_ns = ts.t_start_ns + 1000000000ULL;
     ts.last_stats_wall_ns = ts.t_start_ns;
+    if (cfg.outage_enabled) {
+        outage.start_ns_from_t0 = (uint64_t)cfg.outage_at_sec * 1000000000ULL;
+        outage.duration_ns = (uint64_t)cfg.outage_duration_ms * 1000000ULL;
+        outage.end_ns_from_t0 = outage.start_ns_from_t0 + outage.duration_ns;
+    }
     if (now_process_cpu_ns(&ts.last_process_cpu_ns) != 0) {
         ts.last_process_cpu_ns = 0;
     }
@@ -657,9 +721,39 @@ int main(int argc, char **argv) {
             break;
         }
 
+        uint64_t elapsed_tx_ns = (ts.tx_ts_ns > ts.t_start_ns) ? (ts.tx_ts_ns - ts.t_start_ns) : 0;
         while (ts.tx_ts_ns > ts.next_stats_ns) {
             write_stats_per_1sec(&files, &ts, &totals);
             ts.next_stats_ns += 1000000000ULL;
+        }
+        if (cfg.outage_enabled) {
+            if (!outage.logged_start && elapsed_tx_ns >= outage.start_ns_from_t0) {
+                snprintf(buf, sizeof(buf),
+                         "outage start elapsed_sec=%.3f duration_ms=%d",
+                         (double)elapsed_tx_ns / 1e9,
+                         cfg.outage_duration_ms);
+                write_log_line(files.log_fp, "INFO", buf);
+                outage.logged_start = 1;
+                outage.active = 1;
+            }
+
+            if (outage.active && elapsed_tx_ns < outage.end_ns_from_t0) {
+                while (ts.tx_ts_ns >= ts.next_stats_ns) {
+                    write_stats_per_1sec(&files, &ts, &totals);
+                    ts.next_stats_ns += 1000000000ULL;
+                }
+                continue;
+            }
+
+            if (outage.active && !outage.logged_end && elapsed_tx_ns >= outage.end_ns_from_t0) {
+                snprintf(buf, sizeof(buf),
+                         "outage end elapsed_sec=%.3f duration_ms=%d",
+                         (double)elapsed_tx_ns / 1e9,
+                         cfg.outage_duration_ms);
+                write_log_line(files.log_fp, "INFO", buf);
+                outage.logged_end = 1;
+                outage.active = 0;
+            }
         }
 
         // TX_FRAMES_PER_DATAGRAM 個のフレームを datagram_buf に連結してから 1 回の sendto で送る
@@ -737,6 +831,14 @@ int main(int argc, char **argv) {
 
     uint64_t elapsed_ns = (t_end_ns > ts.t_start_ns) ? (t_end_ns - ts.t_start_ns) : 0;
 
+    if (cfg.outage_enabled && outage.logged_start && !outage.logged_end && files.log_fp) {
+        snprintf(buf, sizeof(buf),
+                 "outage end elapsed_sec=%.3f duration_ms=%d reason=tx_end",
+                 (double)elapsed_ns / 1e9,
+                 cfg.outage_duration_ms);
+        write_log_line(files.log_fp, "INFO", buf);
+    }
+
     while (t_end_ns >= ts.next_stats_ns) {
         write_stats_per_1sec(&files, &ts, &totals);
         ts.next_stats_ns += 1000000000ULL;
@@ -751,3 +853,4 @@ int main(int argc, char **argv) {
     printf("tx finished\n");
     return 0;
 }
+
