@@ -1,0 +1,13 @@
+2026-05-09 20:00:11 [INFO] frame_v1 config version=1 header_len=25 payload_len=48 payload_max=1024
+2026-05-09 20:00:11 [INFO] tx start dst=127.0.0.1:9602 rate_hz=30 duration_sec=5 payload_len=48
+2026-05-09 20:00:11 [INFO] outage configured at_sec=2 duration_ms=500
+2026-05-09 20:00:11 [INFO] frame_v1 first_frame version=1 payload_len=48 seq=0 crc32=0xA5BCA027 frame_len=73
+2026-05-09 20:00:12 [INFO] tx_stats elapsed_sec=1 sent_datagrams=10 sent_frames=30 pps=10.00 cpu_pct=0.11
+2026-05-09 20:00:13 [INFO] tx_stats elapsed_sec=2 sent_datagrams=10 sent_frames=30 pps=10.00 cpu_pct=0.10
+2026-05-09 20:00:13 [INFO] outage start elapsed_sec=2.000 duration_ms=500
+2026-05-09 20:00:13 [INFO] outage end elapsed_sec=2.500 duration_ms=500
+2026-05-09 20:00:14 [INFO] tx_stats elapsed_sec=3 sent_datagrams=5 sent_frames=15 pps=5.00 cpu_pct=0.09
+2026-05-09 20:00:15 [INFO] tx_stats elapsed_sec=4 sent_datagrams=10 sent_frames=30 pps=10.00 cpu_pct=0.12
+2026-05-09 20:00:16 [INFO] tx_stats elapsed_sec=5 sent_datagrams=10 sent_frames=30 pps=10.00 cpu_pct=0.14
+2026-05-09 20:00:16 [INFO] tx summary sent=46 last_seq=137 elapsed_sec=5.000 avg_rate_hz=27.60
+2026-05-09 20:00:16 [INFO] tx end

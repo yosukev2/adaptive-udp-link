@@ -1,0 +1,4 @@
+link_name,trial,mono_ns,elapsed_ms,from_state,to_state,reason
+host_loopback,3,68805965931,5000,Normal,Degraded,no_recv_ok_for_threshold_windows
+host_loopback,3,69803194450,5997,Degraded,Recover,recv_ok_resumed
+host_loopback,3,70805965931,7000,Recover,Normal,recover_completed_by_healthy_windows

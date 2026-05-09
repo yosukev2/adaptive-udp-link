@@ -1,0 +1,7 @@
+outage_ms,mode,degraded_detect_ms,recover_complete_ms,expected_pattern,observed_pattern,trials,degraded_range_ms,recover_range_ms
+500,fsm,na,na,no-transitions,none,3,na,na
+1000,fsm,na,na,no-transitions,none,3,na,na
+3000,fsm,5000,7667,fsm-recovery,Normal->Degraded->Recover->Normal,3,0,1000
+500,timeout-only,na,na,no-transitions,none,3,na,na
+1000,timeout-only,na,na,no-transitions,none,3,na,na
+3000,timeout-only,5000,8000,timeout-only-recovery,Normal->Degraded->Normal,3,0,0
