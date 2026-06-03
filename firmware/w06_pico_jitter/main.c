@@ -5,6 +5,7 @@
 
 #include "pico/stdlib.h"
 #include "pico/time.h"
+#include "pico/stdio_usb.h"
 
 #define PERIOD_TARGET_US 10000u
 #define SAMPLE_COUNT 1000u
@@ -60,6 +61,7 @@ static bool start_capture(void) {
         &capture_timer);
 }
 
+
 static void emit_csv(void) {
     uint64_t previous_timestamp_us = reference_timestamp_us;
 
@@ -70,24 +72,24 @@ static void emit_csv(void) {
         const int64_t jitter_us = delta_us - (int64_t)PERIOD_TARGET_US;
 
         printf(
-            "%s,%s,%" PRIu32 ",%u,%" PRIu64 ",%" PRId64 ",%" PRId64 "\n",
-            kEnvName,
-            kBoardName,
-            i + 1u,
-            PERIOD_TARGET_US,
-            timestamp_us,
-            delta_us,
-            jitter_us);
+        "%s,%s,%lu,%u,%llu,%lld,%lld\n",
+        kEnvName,
+        kBoardName,
+        (unsigned long)(i + 1u),
+        PERIOD_TARGET_US,
+        (unsigned long long)timestamp_us,
+        (long long)delta_us,
+        (long long)jitter_us);
 
-        previous_timestamp_us = timestamp_us;
-    }
+            previous_timestamp_us = timestamp_us;
+        }
 
     fflush(stdout);
 }
 
 int main(void) {
     stdio_init_all();
-
+    stdio_set_translate_crlf(&stdio_usb, false);
     // Allow the host to open USB CDC before the timer starts.
     sleep_ms(STARTUP_SETTLE_MS);
 
