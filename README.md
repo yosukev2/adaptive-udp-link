@@ -76,6 +76,68 @@ RATE_HZ=120 DURATION_SEC=5 PAYLOAD_LEN=64 LINK_NAME=host_loopback \
 RESULT_DIR=logs/reproducibility/custom_run bash scripts/run_reproducibility_check.sh
 ```
 
+## W05 Recovery Matrix
+
+W05 の標準手順はこのスクリプトです。
+
+```bash
+make all
+RESULT_DIR=logs/fsm_recovery/w05_matrix_baseline bash scripts/run_fsm_recovery_check.sh
+```
+
+主な生成物:
+
+- `logs/fsm_recovery/w05_matrix_baseline/fsm_recovery_check.csv`
+- `logs/fsm_recovery/w05_matrix_baseline/summary.txt`
+- `logs/fsm_recovery/w05_matrix_baseline/scenario_500ms/trial_1/rx.log`
+- `logs/fsm_recovery/w05_matrix_baseline/scenario_500ms/trial_1/tx.log`
+- `logs/fsm_recovery/w05_matrix_baseline/scenario_500ms/trial_1/state.csv`
+- `logs/fsm_recovery/w05_matrix_baseline/scenario_1000ms/trial_1/state.csv`
+- `logs/fsm_recovery/w05_matrix_baseline/scenario_3000ms/trial_1/state.csv`
+
+環境変数で条件を上書きできます。
+
+```bash
+TRIALS=3 LINK_NAME=host_loopback RESULT_DIR=logs/fsm_recovery/custom_run \
+bash scripts/run_fsm_recovery_check.sh
+```
+
+`fsm_recovery_check.csv` には少なくとも次の列が入ります。
+
+- `scenario`
+- `trial`
+- `outage_ms`
+- `degraded_detect_ms`
+- `recover_complete_ms`
+
+各 run は `scenario_<duration>/trial_<n>/` にまとまり、`rx.log`、`tx.log`、`state.csv` を残します。現行の 2-window FSM では `0.5s` と `1s` の outage は `Degraded` 閾値を跨がないため、`degraded_detect_ms` と `recover_complete_ms` は `na` になります。`3s` シナリオでは `Normal -> Degraded -> Recover -> Normal` の 3 遷移を必須とし、期待した遷移パターンから外れた run はスクリプトが非 0 で終了します。
+
+## W05 FSM Vs Timeout Compare
+
+最終比較はこのスクリプトで行います。
+
+```bash
+make all
+RESULT_DIR=logs/fsm_recovery/w05_compare_baseline bash scripts/run_fsm_vs_timeout_compare.sh
+```
+
+主な生成物:
+
+- `logs/fsm_recovery/w05_compare_baseline/compare_runs.csv`
+- `logs/fsm_recovery/w05_compare_baseline/compare_summary.csv`
+- `logs/fsm_recovery/w05_compare_baseline/interpretation.md`
+- `logs/fsm_recovery/w05_compare_baseline/mode_fsm/scenario_3000ms/trial_1/state.csv`
+- `logs/fsm_recovery/w05_compare_baseline/mode_timeout_only/scenario_3000ms/trial_1/state.csv`
+
+`compare_summary.csv` には少なくとも次の列が入ります。
+
+- `outage_ms`
+- `mode`
+- `degraded_detect_ms`
+- `recover_complete_ms`
+
+比較 run も `mode_<name>/scenario_<duration>/trial_<n>/` にまとまり、`rx.log`、`tx.log`、`state.csv` を残します。`interpretation.md` には比較表と、短い outage が `na` になる理由、`fsm` と `timeout-only` の挙動差をまとめます。
+
 ## How To Read P95 And P99
 
 各 trial の `rx.log` 末尾に `trial_summary` が出ます。

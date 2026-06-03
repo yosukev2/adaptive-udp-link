@@ -19,6 +19,7 @@
 #include "frame_v1_wire.h"
 
 static int now_process_cpu_ns(uint64_t *out_ns);
+static void normalize_trial_summary_link_name(const char *link_name, char *out, size_t out_size);
 
 static volatile sig_atomic_t g_stop_requested = 0;
 
@@ -54,6 +55,8 @@ typedef struct {
     bool has_trial;        // --trial が明示指定されたか
     const char *csv_in_1sec_log_path;  // １秒ごとの統計ログ（rx_stats）をCSV形式で出力する場合のファイルパス（オプション、未指定ならCSV出力しない）
     const char *csv_by_1recv_log_path;  // 受信ごとの統計ログ（rx_stats）をCSV形式で出力する場合のファイルパス（オプション、未指定ならCSV出力しない）
+    const char *state_log_path;  // FSM 状態遷移をCSV形式で出力する場合のファイルパス（オプション、未指定ならCSV出力しない）
+    int recovery_mode;  // W05 の復旧モード（0=fsm, 1=timeout-only）
     int crc32_test_mode;  // ハードコードした v1 フレームで CRC32 を確認する
 } RxConfig;
 
@@ -61,6 +64,7 @@ typedef struct {
     FILE *log_fp;
     FILE *csv_in_1sec_fp;
     FILE *csv_by_1recv_fp;
+    FILE *state_fp;
 } RxFiles;
 
 typedef struct {
@@ -139,6 +143,11 @@ typedef struct {
     uint64_t consecutive_good_windows;
 } RxLinkFsm;
 
+typedef enum {
+    RX_RECOVERY_MODE_FSM = 0,
+    RX_RECOVERY_MODE_TIMEOUT_ONLY = 1,
+} RxRecoveryMode;
+
 #define RX_FSM_DEGRADED_EMPTY_WINDOWS UINT64_C(2)
 #define RX_FSM_RECOVER_GOOD_WINDOWS UINT64_C(2)
 
@@ -157,7 +166,7 @@ typedef enum {
 
 static void print_usage(const char *prog) {
     fprintf(stderr,
-            "Usage: %s --bind-ip <ip> --port <port> --duration-sec <sec> --log-path <path> [--link-name <name>] [--trial <n>] [--csv-in-1sec-log-path <path>] [--csv-by-1recv-log-path <path>] [--crc32-test]\n",
+            "Usage: %s --bind-ip <ip> --port <port> --duration-sec <sec> --log-path <path> [--link-name <name>] [--trial <n>] [--csv-in-1sec-log-path <path>] [--csv-by-1recv-log-path <path>] [--state-log-path <path>] [--recovery-mode fsm|timeout-only] [--crc32-test]\n",
             prog);
 }
 
@@ -169,6 +178,21 @@ static int parse_int(const char *s, int *out) {
     if (v < -2147483648L || v > 2147483647L) return -1;
     *out = (int)v;
     return 0;
+}
+
+static int parse_recovery_mode(const char *s, int *out) {
+    if (!s || !out) {
+        return -1;
+    }
+    if (strcmp(s, "fsm") == 0) {
+        *out = RX_RECOVERY_MODE_FSM;
+        return 0;
+    }
+    if (strcmp(s, "timeout-only") == 0) {
+        *out = RX_RECOVERY_MODE_TIMEOUT_ONLY;
+        return 0;
+    }
+    return -1;
 }
 
 static int parse_args(int argc, char **argv, RxConfig *cfg) {
@@ -184,7 +208,9 @@ static int parse_args(int argc, char **argv, RxConfig *cfg) {
         {"trial", required_argument, 0, 6},
         {"csv-in-1sec-log-path", required_argument, 0, 7},
         {"csv-by-1recv-log-path", required_argument, 0, 8},
-        {"crc32-test", no_argument, 0, 9},
+        {"state-log-path", required_argument, 0, 9},
+        {"recovery-mode", required_argument, 0, 10},
+        {"crc32-test", no_argument, 0, 11},
         {0, 0, 0, 0}
     };
 
@@ -236,6 +262,16 @@ static int parse_args(int argc, char **argv, RxConfig *cfg) {
                 cfg->csv_by_1recv_log_path = optarg;
                 break;
             case 9:
+                cfg->state_log_path = optarg;
+                break;
+            case 10:
+                if (parse_recovery_mode(optarg, &cfg->recovery_mode) != 0) {
+                    fprintf(stderr, "Invalid --recovery-mode: %s (expected fsm|timeout-only)\n", optarg);
+                    print_usage(argv[0]);
+                    return -1;
+                }
+                break;
+            case 11:
                 cfg->crc32_test_mode = 1;
                 break;
 
@@ -254,6 +290,11 @@ static int parse_args(int argc, char **argv, RxConfig *cfg) {
         return -1;
     }
 
+    if (cfg->recovery_mode != RX_RECOVERY_MODE_FSM &&
+        cfg->recovery_mode != RX_RECOVERY_MODE_TIMEOUT_ONLY) {
+        cfg->recovery_mode = RX_RECOVERY_MODE_FSM;
+    }
+
     return 0;
 }
 
@@ -269,6 +310,10 @@ static void close_output_files(RxFiles *files) {
     if (files->csv_by_1recv_fp) {
         fclose(files->csv_by_1recv_fp);
         files->csv_by_1recv_fp = NULL;
+    }
+    if (files->state_fp) {
+        fclose(files->state_fp);
+        files->state_fp = NULL;
     }
 }
 
@@ -301,6 +346,17 @@ static int open_output_files(const RxConfig *config, RxFiles *files) {
         fflush(files->csv_by_1recv_fp);
     }
 
+    if (config->state_log_path) {
+        files->state_fp = fopen(config->state_log_path, "w");
+        if (!files->state_fp) {
+            perror("fopen(state_log_path)");
+            close_output_files(files);
+            return -1;
+        }
+        fprintf(files->state_fp, "link_name,trial,mono_ns,elapsed_ms,from_state,to_state,reason\n");
+        fflush(files->state_fp);
+    }
+
     return 0;
 }
 
@@ -331,7 +387,17 @@ static const char *rx_link_state_name(RxLinkState state) {
     }
 }
 
-static void write_fsm_threshold_log(const RxFiles *files, RxLinkState initial_state) {
+static const char *rx_recovery_mode_name(RxRecoveryMode mode) {
+    switch (mode) {
+        case RX_RECOVERY_MODE_TIMEOUT_ONLY:
+            return "timeout-only";
+        case RX_RECOVERY_MODE_FSM:
+        default:
+            return "fsm";
+    }
+}
+
+static void write_fsm_threshold_log(const RxFiles *files, RxRecoveryMode mode, RxLinkState initial_state) {
     char msg[256];
 
     if (!files || !files->log_fp) {
@@ -341,8 +407,9 @@ static void write_fsm_threshold_log(const RxFiles *files, RxLinkState initial_st
     snprintf(
         msg,
         sizeof(msg),
-        "link_fsm initial=%s degraded_detect=recv_ok_zero_for_%" PRIu64
+        "link_fsm mode=%s initial=%s degraded_detect=recv_ok_zero_for_%" PRIu64
         "_windows recover_complete=recv_ok_positive_for_%" PRIu64 "_windows",
+        rx_recovery_mode_name(mode),
         rx_link_state_name(initial_state),
         RX_FSM_DEGRADED_EMPTY_WINDOWS,
         RX_FSM_RECOVER_GOOD_WINDOWS
@@ -388,8 +455,47 @@ static void write_fsm_transition_log(
     write_log_line(files->log_fp, "INFO", msg);
 }
 
+static void write_fsm_transition_csv(
+    const RxFiles *files,
+    const RxConfig *config,
+    RxLinkState from_state,
+    RxLinkState to_state,
+    uint64_t t_start_ns,
+    uint64_t event_ns,
+    const char *reason
+) {
+    char link_name_token[128];
+    uint64_t elapsed_ms = 0;
+
+    if (!files || !files->state_fp || !config || !reason) {
+        return;
+    }
+    if (!config->has_link_name || !config->has_trial) {
+        return;
+    }
+
+    normalize_trial_summary_link_name(config->link_name, link_name_token, sizeof(link_name_token));
+    if (event_ns >= t_start_ns) {
+        elapsed_ms = (event_ns - t_start_ns) / UINT64_C(1000000);
+    }
+
+    fprintf(
+        files->state_fp,
+        "%s,%d,%" PRIu64 ",%" PRIu64 ",%s,%s,%s\n",
+        link_name_token,
+        config->trial,
+        event_ns,
+        elapsed_ms,
+        rx_link_state_name(from_state),
+        rx_link_state_name(to_state),
+        reason
+    );
+    fflush(files->state_fp);
+}
+
 static void transition_link_state(
     const RxFiles *files,
+    const RxConfig *config,
     RxLinkFsm *fsm,
     RxLinkState next_state,
     uint64_t t_start_ns,
@@ -413,6 +519,15 @@ static void transition_link_state(
         fsm->consecutive_empty_windows,
         fsm->consecutive_good_windows,
         recv_ok_in_window,
+        reason
+    );
+    write_fsm_transition_csv(
+        files,
+        config,
+        prev_state,
+        next_state,
+        t_start_ns,
+        event_ns,
         reason
     );
 
@@ -974,20 +1089,23 @@ static void write_log_per_1sec(const RxFiles *files, RxTimingState *ts, WindowSt
     }
 }
 
-static void on_recv_ok_for_fsm(const RxFiles *files, RxTimingState *ts, RxLinkFsm *fsm, uint64_t recv_ok_in_window) {
-    if (!files || !ts || !fsm) {
+static void on_recv_ok_for_fsm(const RxFiles *files, const RxConfig *config, RxTimingState *ts, RxLinkFsm *fsm, uint64_t recv_ok_in_window) {
+    if (!files || !config || !ts || !fsm) {
         return;
     }
     if (fsm->state == RX_LINK_STATE_DEGRADED) {
-        transition_link_state(
-            files,
-            fsm,
-            RX_LINK_STATE_RECOVER,
-            ts->t_start_ns,
-            ts->recv_now_ns,
-            recv_ok_in_window,
-            "recv_ok_resumed"
-        );
+        if (config->recovery_mode == RX_RECOVERY_MODE_FSM) {
+            transition_link_state(
+                files,
+                config,
+                fsm,
+                RX_LINK_STATE_RECOVER,
+                ts->t_start_ns,
+                ts->recv_now_ns,
+                recv_ok_in_window,
+                "recv_ok_resumed"
+            );
+        }
     }
 }
 
@@ -1016,6 +1134,7 @@ static void evaluate_fsm_window(
         if (fsm->state == RX_LINK_STATE_RECOVER && allow_degraded_transition) {
             transition_link_state(
                 files,
+                config,
                 fsm,
                 RX_LINK_STATE_DEGRADED,
                 ts->t_start_ns,
@@ -1030,6 +1149,7 @@ static void evaluate_fsm_window(
             allow_degraded_transition) {
             transition_link_state(
                 files,
+                config,
                 fsm,
                 RX_LINK_STATE_DEGRADED,
                 ts->t_start_ns,
@@ -1047,12 +1167,31 @@ static void evaluate_fsm_window(
         if (fsm->consecutive_good_windows >= RX_FSM_RECOVER_GOOD_WINDOWS) {
             transition_link_state(
                 files,
+                config,
                 fsm,
                 RX_LINK_STATE_NORMAL,
                 ts->t_start_ns,
                 window_end_ns,
                 win->recv_ok,
                 "recover_completed_by_healthy_windows"
+            );
+        }
+        return;
+    }
+
+    if (fsm->state == RX_LINK_STATE_DEGRADED &&
+        config->recovery_mode == RX_RECOVERY_MODE_TIMEOUT_ONLY) {
+        fsm->consecutive_good_windows++;
+        if (fsm->consecutive_good_windows >= RX_FSM_RECOVER_GOOD_WINDOWS) {
+            transition_link_state(
+                files,
+                config,
+                fsm,
+                RX_LINK_STATE_NORMAL,
+                ts->t_start_ns,
+                window_end_ns,
+                win->recv_ok,
+                "timeout_only_recovered_by_healthy_windows"
             );
         }
         return;
@@ -1130,7 +1269,11 @@ int main(int argc, char **argv) {
                 "rx start bind=%s:%d duration_sec=%d",
                 cfg.bind_ip, cfg.port, cfg.duration_sec);
         write_log_line(files.log_fp, "INFO", buf);
-        write_fsm_threshold_log(&files, link_fsm.state);
+        snprintf(buf, sizeof(buf),
+                 "rx recovery_mode=%s",
+                 (cfg.recovery_mode == RX_RECOVERY_MODE_TIMEOUT_ONLY) ? "timeout-only" : "fsm");
+        write_log_line(files.log_fp, "INFO", buf);
+        write_fsm_threshold_log(&files, cfg.recovery_mode, link_fsm.state);
     }
 
     printf("rx started: bind=%s:%d duration=%d log=%s\n", cfg.bind_ip, cfg.port, cfg.duration_sec, cfg.log_path);
@@ -1282,7 +1425,7 @@ int main(int argc, char **argv) {
 
                 totals.recv_ok++;
                 win->recv_ok++;
-                on_recv_ok_for_fsm(&files, &ts, &link_fsm, win->recv_ok);
+                on_recv_ok_for_fsm(&files, &cfg, &ts, &link_fsm, win->recv_ok);
             }
         }
 

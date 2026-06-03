@@ -1,0 +1,15 @@
+2026-05-09 20:01:26 [INFO] frame_v1 config version=1 header_len=25 payload_max=1024 frame_max=1049 stream_buf_cap=4196
+2026-05-09 20:01:26 [INFO] rx start bind=127.0.0.1:9703 duration_sec=7
+2026-05-09 20:01:26 [INFO] rx recovery_mode=timeout-only
+2026-05-09 20:01:26 [INFO] link_fsm mode=timeout-only initial=Normal degraded_detect=recv_ok_zero_for_2_windows recover_complete=recv_ok_positive_for_2_windows
+2026-05-09 20:01:27 [INFO] rx_stats elapsed_sec=1 avg_latency=0.197 max_latency=0.197 min_latency=0.197 recv_cnt=1 ok_recv_cnt=3 gap_cnt=0 dup_cnt=0 reord_cnt=0 pps=1.00 cpu_pct=0.01
+2026-05-09 20:01:28 [INFO] rx_stats elapsed_sec=2 avg_latency=0.155 max_latency=0.202 min_latency=0.107 recv_cnt=9 ok_recv_cnt=27 gap_cnt=0 dup_cnt=0 reord_cnt=0 pps=9.00 cpu_pct=0.04
+2026-05-09 20:01:29 [INFO] rx_stats elapsed_sec=3 avg_latency=0.231 max_latency=0.930 min_latency=0.122 recv_cnt=10 ok_recv_cnt=30 gap_cnt=0 dup_cnt=0 reord_cnt=0 pps=10.00 cpu_pct=0.04
+2026-05-09 20:01:30 [INFO] rx_stats elapsed_sec=4 avg_latency=0.000 max_latency=0.000 min_latency=0.000 recv_cnt=0 ok_recv_cnt=0 gap_cnt=0 dup_cnt=0 reord_cnt=0 pps=0.00 cpu_pct=0.01
+2026-05-09 20:01:31 [INFO] rx_stats elapsed_sec=5 avg_latency=0.449 max_latency=2.571 min_latency=0.151 recv_cnt=10 ok_recv_cnt=30 gap_cnt=0 dup_cnt=0 reord_cnt=0 pps=10.00 cpu_pct=0.06
+2026-05-09 20:01:32 [INFO] rx_stats elapsed_sec=6 avg_latency=0.284 max_latency=1.087 min_latency=0.113 recv_cnt=10 ok_recv_cnt=30 gap_cnt=0 dup_cnt=0 reord_cnt=0 pps=10.00 cpu_pct=0.05
+2026-05-09 20:01:33 [INFO] rx_stats elapsed_sec=7 avg_latency=0.883 max_latency=0.883 min_latency=0.883 recv_cnt=1 ok_recv_cnt=3 gap_cnt=0 dup_cnt=0 reord_cnt=0 pps=1.00 cpu_pct=0.01
+2026-05-09 20:01:33 [INFO] duration elapsed, exiting
+2026-05-09 20:01:33 [INFO] rx summary recv_any=41 recv_ok=123 bad_size=0 bad_header=0 bad_crc=0 resync_count=0 preamble_miss=0 crc_fail=0 len_invalid=0 poll_timeout=3 elapsed_ms=7005 avg_latency_ms=0.296 max_latency_ms=2 min_latency_ms=0 gap_cnt=0 dup_cnt=0 reord_cnt=0 future_ts_cnt=0 future_ts_detected=0
+2026-05-09 20:01:33 [INFO] trial_summary link_name=host_loopback trial=1 duration_sec=7 sent=na recv_ok=123 gap_est=0 crc_fail=0 len_invalid=0 preamble_miss=0 resync_count=0 latency_p50_ms=0.178 latency_p95_ms=0.930 latency_p99_ms=2.571 latency_max_ms=2.571
+2026-05-09 20:01:33 [INFO] rx end
