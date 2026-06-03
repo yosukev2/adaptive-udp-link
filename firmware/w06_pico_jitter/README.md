@@ -97,4 +97,4 @@ cat /dev/ttyACM0 > data/w06/pico_jitter_raw.csv
 - `data/w06/pico_jitter_raw.csv` に 1001 行が取得できるか
 - UART 経由が必要な配線条件かどうか
 
-実機確認コマンド案は [../../docs/w06_run_log.md](../../docs/w06_run_log.md) にまとめています。
+実機確認コマンド案は [../../docs/w06_pico_jitter_run_log.md](../../docs/w06_pico_jitter_run_log.md) にまとめています。

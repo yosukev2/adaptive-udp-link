@@ -252,4 +252,4 @@ CSV出力処理 `emit_csv()` は、1000サンプル取得後に `main()` 側か�
 * [x] Raspberry Pi 5側でPicoログをCSV保存できる
 * [x] CSV列がIssue #84の共通スキーマに一致している
 * [x] interrupt内でserial出力していない
-* [x] 実行ログを `docs/w06_run_log.md` に記録している
+* [x] 実行ログを `docs/w06_pico_jitter_run_log.md` に記録している
