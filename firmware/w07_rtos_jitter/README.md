@@ -1,59 +1,59 @@
 # w07_rtos_jitter
 
-Issue #101 adds the W07 Raspberry Pi Pico firmware layout for comparing a bare-metal single-loop sender against a FreeRTOS task-separated sender.
+Issue #101 向けの Raspberry Pi Pico firmware です。bare-metal の単一ループ構成と、FreeRTOS のタスク分離構成で送信イベントの周期ジッタを比較します。
 
-## Targets
+## ビルドターゲット
 
-- `w07_baremetal_jitter`: single loop, absolute 10 ms schedule, simulated RX workload in the same loop
-- `w07_freertos_jitter`: `tx_task`, `rx_task`, and `state_task` with FreeRTOS Queue/Semaphore coordination
+- `w07_baremetal_jitter`: 単一ループ内で絶対時刻基準の 10ms 周期処理と受信模擬負荷を実行する
+- `w07_freertos_jitter`: `tx_task`、`rx_task`、`state_task` を FreeRTOS の Queue/Semaphore で連携させる
 
-Both targets use USB CDC serial for CSV output. GPIO UART wiring is not required for W07.
+両ターゲットとも CSV 出力には USB CDC serial を使います。W07 では GPIO UART 配線は不要です。
 
-## Measurement Rules
+## 計測ルール
 
-- Target period: `10000 us`
-- Sample count: 1000
-- Measurement timestamps are stored in memory during capture
-- No `printf` is performed inside the timing-critical measurement path
-- CSV output happens only after capture completes
-- Pico SDK and FreeRTOS-Kernel are external dependencies and are not committed to this repository
+- 目標周期: `10000 us`
+- サンプル数: 1000
+- 計測中の timestamp はメモリへ保存する
+- タイミングが重要な計測処理内では `printf` しない
+- CSV は計測完了後にまとめて出力する
+- Pico SDK と FreeRTOS-Kernel は外部依存として扱い、このリポジトリにはコミットしない
 
-## CSV Schemas
+## CSV スキーマ
 
-Bare-metal:
+bare-metal 版:
 
 ```text
 mode,board,sample_index,period_target_us,timestamp_us,delta_us,jitter_us
 ```
 
-FreeRTOS:
+FreeRTOS 版:
 
 ```text
 mode,board,sample_index,period_target_us,timestamp_us,delta_us,jitter_us,queue_latency_us,deadline_miss_count
 ```
 
-`queue_latency_us` uses:
+`queue_latency_us` は次の差分です。
 
 ```text
 state_task_receive_time_us - tx_task_queue_send_time_us
 ```
 
-Special values:
+特殊値:
 
-- `-1`: queue send failed
-- `-2`: queue event was not received before completion handling
+- `-1`: Queue への送信失敗
+- `-2`: 完了処理までに Queue event を受信できなかった
 
-## Build
+## ビルド
 
-Prerequisites:
+前提:
 
-- Pico SDK installed outside this repository
-- FreeRTOS-Kernel installed outside this repository
-- `PICO_SDK_PATH` points to Pico SDK
-- `FREERTOS_KERNEL_PATH` points to FreeRTOS-Kernel
-- `arm-none-eabi-gcc`, CMake, and a supported generator are available
+- Pico SDK がリポジトリ外にインストールされている
+- FreeRTOS-Kernel がリポジトリ外に配置されている
+- `PICO_SDK_PATH` が Pico SDK を指している
+- `FREERTOS_KERNEL_PATH` が FreeRTOS-Kernel を指している
+- `arm-none-eabi-gcc`、CMake、対応する generator が利用できる
 
-Example:
+実行例:
 
 ```bash
 export PICO_SDK_PATH=/home/pi5/pico/pico-sdk
@@ -62,11 +62,11 @@ cmake -G Ninja -S firmware/w07_rtos_jitter -B firmware/w07_rtos_jitter/build
 cmake --build firmware/w07_rtos_jitter/build
 ```
 
-Expected UF2 outputs:
+想定される UF2 出力:
 
 - `firmware/w07_rtos_jitter/build/w07_baremetal_jitter.uf2`
 - `firmware/w07_rtos_jitter/build/w07_freertos_jitter.uf2`
 
-## Current Status
+## 現在の状態
 
-This issue is build-layout work only. Pico hardware execution and CSV capture are handled by later W07 issues.
+Issue #101 の範囲は firmware の正式配置とビルド定義の追加までです。Pico 実機での実行と CSV 取得は、後続の W07 Issue で実施します。
