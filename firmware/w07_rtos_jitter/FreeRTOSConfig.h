@@ -12,7 +12,7 @@
 #define configMINIMAL_STACK_SIZE 256
 #define configTOTAL_HEAP_SIZE (64 * 1024)
 #define configMAX_TASK_NAME_LEN 16
-#define configUSE_16_BIT_TICKS 0
+#define configTICK_TYPE_WIDTH_IN_BITS TICK_TYPE_WIDTH_32_BITS
 #define configIDLE_SHOULD_YIELD 1
 #define configUSE_MUTEXES 1
 #define configUSE_RECURSIVE_MUTEXES 0
@@ -27,6 +27,13 @@
 #define configNUM_THREAD_LOCAL_STORAGE_POINTERS 0
 #define configSTACK_DEPTH_TYPE uint32_t
 #define configMESSAGE_BUFFER_LENGTH_TYPE size_t
+
+#define configNUMBER_OF_CORES 1
+#define configTICK_CORE 0
+#define configRUN_MULTIPLE_PRIORITIES 0
+
+#define configSUPPORT_PICO_SYNC_INTEROP 1
+#define configSUPPORT_PICO_TIME_INTEROP 1
 
 #define configUSE_IDLE_HOOK 0
 #define configUSE_TICK_HOOK 0
@@ -52,21 +59,5 @@
 #define INCLUDE_xTaskGetSchedulerState 1
 #define INCLUDE_xTaskGetCurrentTaskHandle 1
 #define INCLUDE_xTaskGetTickCount 1
-
-#ifdef __NVIC_PRIO_BITS
-#define configPRIO_BITS __NVIC_PRIO_BITS
-#else
-#define configPRIO_BITS 2
-#endif
-
-#define configLIBRARY_LOWEST_INTERRUPT_PRIORITY ((1U << configPRIO_BITS) - 1U)
-#define configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY 1
-
-#define configKERNEL_INTERRUPT_PRIORITY (configLIBRARY_LOWEST_INTERRUPT_PRIORITY << (8U - configPRIO_BITS))
-#define configMAX_SYSCALL_INTERRUPT_PRIORITY (configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY << (8U - configPRIO_BITS))
-
-#define vPortSVCHandler isr_svcall
-#define xPortPendSVHandler isr_pendsv
-#define xPortSysTickHandler isr_systick
 
 #endif

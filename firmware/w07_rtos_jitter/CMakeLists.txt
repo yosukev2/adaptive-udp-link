@@ -32,23 +32,13 @@ if(NOT DEFINED FREERTOS_KERNEL_PATH)
     endif()
 endif()
 
-if(NOT EXISTS "${FREERTOS_KERNEL_PATH}/tasks.c")
-    message(FATAL_ERROR "FreeRTOS-Kernel not found at ${FREERTOS_KERNEL_PATH}.")
-endif()
-
 set(FREERTOS_PORT_DIR "${FREERTOS_KERNEL_PATH}/portable/ThirdParty/GCC/RP2040")
-if(EXISTS "${FREERTOS_PORT_DIR}/port.c")
-    set(FREERTOS_PORT_SOURCE "${FREERTOS_PORT_DIR}/port.c")
-    set(FREERTOS_PORT_INCLUDE "${FREERTOS_PORT_DIR}/include")
-else()
-    set(FREERTOS_PORT_DIR "${FREERTOS_KERNEL_PATH}/portable/GCC/ARM_CM0")
-    set(FREERTOS_PORT_SOURCE "${FREERTOS_PORT_DIR}/port.c")
-    set(FREERTOS_PORT_INCLUDE "${FREERTOS_PORT_DIR}")
+if(NOT EXISTS "${FREERTOS_PORT_DIR}/CMakeLists.txt")
+    message(FATAL_ERROR "FreeRTOS RP2040 port not found at ${FREERTOS_PORT_DIR}.")
 endif()
 
-if(NOT EXISTS "${FREERTOS_PORT_SOURCE}")
-    message(FATAL_ERROR "FreeRTOS port source not found. Expected RP2040 or ARM_CM0 port under ${FREERTOS_KERNEL_PATH}/portable.")
-endif()
+set(FREERTOS_CONFIG_FILE_DIRECTORY "${CMAKE_CURRENT_LIST_DIR}")
+add_subdirectory("${FREERTOS_PORT_DIR}" FREERTOS_KERNEL)
 
 add_executable(w07_baremetal_jitter
     baremetal_main.c
@@ -66,22 +56,14 @@ pico_add_extra_outputs(w07_baremetal_jitter)
 
 add_executable(w07_freertos_jitter
     freertos_main.c
-    ${FREERTOS_KERNEL_PATH}/tasks.c
-    ${FREERTOS_KERNEL_PATH}/queue.c
-    ${FREERTOS_KERNEL_PATH}/list.c
-    ${FREERTOS_KERNEL_PATH}/timers.c
-    ${FREERTOS_KERNEL_PATH}/event_groups.c
-    ${FREERTOS_KERNEL_PATH}/portable/MemMang/heap_4.c
-    ${FREERTOS_PORT_SOURCE}
 )
 
 target_include_directories(w07_freertos_jitter PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}
-    ${FREERTOS_KERNEL_PATH}/include
-    ${FREERTOS_PORT_INCLUDE}
 )
 
 target_link_libraries(w07_freertos_jitter
+    FreeRTOS-Kernel-Heap4
     pico_stdlib
     pico_time
 )
