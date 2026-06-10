@@ -1,7 +1,8 @@
 #ifndef FREERTOS_CONFIG_H
 #define FREERTOS_CONFIG_H
 
-#include "pico/stdlib.h"
+// Keep this header independent of Pico SDK headers. The RP2040 adapter includes
+// it from pico/config.h, so including pico/stdlib.h here creates an include cycle.
 
 #define configUSE_PREEMPTION 1
 #define configUSE_PORT_OPTIMISED_TASK_SELECTION 0
