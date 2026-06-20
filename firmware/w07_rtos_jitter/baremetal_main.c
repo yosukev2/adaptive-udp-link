@@ -7,7 +7,6 @@
 // CSV schema:
 //   mode,board,sample_index,period_target_us,timestamp_us,delta_us,jitter_us
 
-#include <inttypes.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -48,12 +47,12 @@ static void output_csv(void)
             jitter_us = delta_us - (int64_t)PERIOD_TARGET_US;
         }
 
-        printf("baremetal,pico,%lu,%u,%" PRIu64 ",%" PRId64 ",%" PRId64 "\r\n",
+        printf("baremetal,pico,%lu,%u,%llu,%lld,%lld\r\n",
                (unsigned long)(i + 1u),
                PERIOD_TARGET_US,
-               timestamps_us[i],
-               delta_us,
-               jitter_us);
+               (unsigned long long)timestamps_us[i],
+               (long long)delta_us,
+               (long long)jitter_us);
     }
 
     fflush(stdout);

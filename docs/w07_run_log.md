@@ -89,3 +89,45 @@ Interpretation:
 - Real jitter measurement
 
 These steps are intentionally left for W07-2, W07-3, and W07-4.
+
+## Raspberry Pi 5でのビルド確認（Issue #102）
+
+- 実施日時: `2026-06-11T08:15:03+09:00`
+- ホスト: Raspberry Pi 5 / aarch64
+- OS: Debian、Linux `6.12.75+rpt-rpi-2712`
+- CMake: `3.31.6`
+- ARM GCC: `14.2.1`
+- Pico SDK: `2.2.0`
+- FreeRTOS-Kernel: `V10.4.3-776-gd877cd539`
+- Pico SDKパス: `/home/pi5/pico/pico-sdk`
+- FreeRTOS-Kernelパス: `/home/pi5/pico/FreeRTOS-Kernel`
+
+### 実行コマンド
+
+```bash
+export PICO_SDK_PATH=/home/pi5/pico/pico-sdk
+export FREERTOS_KERNEL_PATH=/home/pi5/pico/FreeRTOS-Kernel
+rm -rf firmware/w07_rtos_jitter/build
+cmake -G Ninja -S firmware/w07_rtos_jitter -B firmware/w07_rtos_jitter/build
+cmake --build firmware/w07_rtos_jitter/build --parallel
+```
+
+### ビルド結果
+
+- CMake configure: 成功
+- `w07_baremetal_jitter.uf2`: 生成成功、77K
+- `w07_freertos_jitter.uf2`: 生成成功、100K
+- `picotool`はUSBサポートなしでビルドされているが、UF2生成には影響しなかった
+
+```text
+113fd7585dcad4a571833aa2497a826b783727b86724e70416ad1fc64b275ff4  w07_baremetal_jitter.uf2
+141232fedd42290e337c3c122964676ad7bcd35b4d6ccb548cbb45b00a616117  w07_freertos_jitter.uf2
+```
+
+### 未確認事項
+
+- PicoへのUF2書き込み
+- Pico実機でのfirmware実行
+- USB CDC serialからのCSV取得
+
+実機確認とCSV取得はIssue #103および#104で実施する。

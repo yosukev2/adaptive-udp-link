@@ -16,7 +16,6 @@
 //   - queue_latency_us is measured as:
 //       state_task_receive_time_us - tx_task_queue_send_time_us
 
-#include <inttypes.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -188,13 +187,13 @@ static void state_task(void *param)
     printf("mode,board,sample_index,period_target_us,timestamp_us,delta_us,jitter_us,queue_latency_us,deadline_miss_count\r\n");
 
     for (uint32_t i = 0; i < SAMPLE_COUNT; i++) {
-        printf("freertos,pico,%lu,%u,%" PRIu64 ",%" PRId64 ",%" PRId64 ",%" PRId64 ",%lu\r\n",
+        printf("freertos,pico,%lu,%u,%llu,%lld,%lld,%lld,%lu\r\n",
                (unsigned long)(i + 1u),
                PERIOD_TARGET_US,
-               g_timestamps_us[i],
-               g_delta_us[i],
-               g_jitter_us[i],
-               g_queue_latency_us[i],
+               (unsigned long long)g_timestamps_us[i],
+               (long long)g_delta_us[i],
+               (long long)g_jitter_us[i],
+               (long long)g_queue_latency_us[i],
                (unsigned long)g_deadline_miss_count);
     }
 
