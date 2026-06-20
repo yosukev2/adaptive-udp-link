@@ -131,3 +131,61 @@ cmake --build firmware/w07_rtos_jitter/build --parallel
 - USB CDC serialからのCSV取得
 
 実機確認とCSV取得はIssue #103および#104で実施する。
+
+## Pico bare-metal実機計測（Issue #103）
+
+- 実施日時: `2026-06-20T21:55:44+09:00`
+- ホスト: Raspberry Pi 5 / aarch64
+- OS: Debian、Linux `6.12.75+rpt-rpi-2712`
+- Git branch: `issue-103-w07-baremetal-csv`
+- Git commit: `4cdb3a7ac1b1f60863fc3f648141b9ac9ea52c29`
+- firmware: `w07_baremetal_jitter.uf2`
+- firmware SHA256: `78402461cfafa6d5ece5a19c43fc485e880be14f3dc1b483bc64c92eb8ffcd85`
+- USB CDC ID: `/dev/serial/by-id/usb-Raspberry_Pi_Pico_5303284728FC519C-if00`
+- USB CDC device: `/dev/ttyACM0`
+
+### UF2書き込み
+
+PicoをBOOTSELモードで接続し、`/dev/sdb1`をマウントした。
+
+```bash
+udisksctl mount -b /dev/sdb1
+cp firmware/w07_rtos_jitter/build/w07_baremetal_jitter.uf2 \
+  /media/pi5/RPI-RP2/
+```
+
+UF2書き込み後、Picoは自動的に通常起動し、USB CDC serialとして認識された。
+
+### CSV取得
+
+各runの取得前にPicoを通常再起動した。run 2とrun 3ではBOOTSELを使用せず、USBの抜き差しで再起動した。
+
+```bash
+stty -F /dev/ttyACM0 115200 raw -echo
+timeout 20s cat /dev/ttyACM0 > data/w07/baremetal_run1.csv
+```
+
+run 2、run 3も同じ方法で、それぞれ以下へ保存した。
+
+- `data/w07/baremetal_run1.csv`
+- `data/w07/baremetal_run2.csv`
+- `data/w07/baremetal_run3.csv`
+
+`timeout`の終了コードは全runで`124`だった。firmwareがCSV出力後もUSB CDCを閉じないためであり、想定どおりである。
+
+### 検証結果
+
+全runで以下を確認した。
+
+- CSVはheader 1行 + data 1000行の合計1001行
+- headerは`mode,board,sample_index,period_target_us,timestamp_us,delta_us,jitter_us`
+- `mode=baremetal`
+- `sample_index=1..1000`
+- `period_target_us=10000`
+- `jitter_us = delta_us - period_target_us`
+- timestamp差分と`delta_us`が一致
+- `index_errors=0`
+- `mode_period_errors=0`
+- `formula_errors=0`
+
+計測中はtimestampをメモリへ保存し、1000サンプル取得後にまとめて`printf`する実装である。
