@@ -25,6 +25,8 @@ Both programs use `CLOCK_MONOTONIC`. End-to-end latency is calculated from the T
 
 `--rate-hz` already provides the W08 send-interval control. It is a frame rate, not a datagram rate: `rate-hz=100` produces approximately 33.3 datagrams/s with 3 frames per datagram, or 100 frames/s.
 
+Some TX send-loop failures, including `sendto()` failure or an unexpected sent size, write an `ERROR` log and break the loop but still reach the final `return 0`. Therefore a zero TX exit status alone does not prove a valid run. W08 validation must require both exit status zero and no `ERROR` entry in the TX log. Changing this runtime behavior is outside this inventory-only issue.
+
 ## `rx` CLI
 
 | option | required | accepted value / default | current behavior |
