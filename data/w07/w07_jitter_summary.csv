@@ -1,0 +1,13 @@
+scope,mode,run,metric,sample_count,p50_us,p95_us,p99_us,max_us,stddev_us,queue_send_fail_count,queue_not_received_count,deadline_miss_count
+run,baremetal,run1,abs_jitter_us,999,882.000000,1839.000000,1839.000000,1840.000000,447.964541,0,0,
+run,baremetal,run2,abs_jitter_us,999,882.000000,1839.000000,1839.000000,1840.000000,447.963783,0,0,
+run,baremetal,run3,abs_jitter_us,999,882.000000,1839.000000,1839.000000,1840.000000,447.963783,0,0,
+run,freertos,run1,abs_jitter_us,999,0.000000,0.000000,0.000000,21.000000,0.679291,0,0,0
+run,freertos,run1,queue_latency_us,1000,8.000000,8.000000,8.000000,80.000000,2.289520,0,0,0
+run,freertos,run2,abs_jitter_us,999,0.000000,0.000000,0.000000,85.000000,4.387556,0,0,0
+run,freertos,run2,queue_latency_us,1000,7.000000,7.000000,7.000000,80.000000,2.338539,0,0,0
+run,freertos,run3,abs_jitter_us,999,0.000000,0.000000,1.000000,21.000000,0.690562,0,0,0
+run,freertos,run3,queue_latency_us,1000,7.000000,7.000000,7.000000,80.000000,2.329463,0,0,0
+mode,baremetal,all,abs_jitter_us,2997,882.000000,1839.000000,1839.000000,1840.000000,447.964036,0,0,
+mode,freertos,all,abs_jitter_us,2997,0.000000,0.000000,0.000000,85.000000,2.596905,0,0,0
+mode,freertos,all,queue_latency_us,3000,7.000000,8.000000,8.000000,80.000000,2.365576,0,0,0
