@@ -189,3 +189,74 @@ run 2、run 3も同じ方法で、それぞれ以下へ保存した。
 - `formula_errors=0`
 
 計測中はtimestampをメモリへ保存し、1000サンプル取得後にまとめて`printf`する実装である。
+
+## Pico FreeRTOS実機計測（Issue #104）
+
+- 実施日時: `2026-06-21T11:16:44+09:00`
+- ホスト: Raspberry Pi 5 / aarch64
+- OS: Debian、Linux `6.12.75+rpt-rpi-2712`
+- Git branch: `issue-104-w07-freertos-csv`
+- Git commit: `add0c21b4a81dad3e743bfd0fbe1eb330f90c551`
+- firmware: `w07_freertos_jitter.uf2`
+- firmware SHA256: `af028e2be0ed34e629564bcbb73c45b3d499edc0dc8438fb2bec647f40b803ee`
+- USB CDC ID: `/dev/serial/by-id/usb-Raspberry_Pi_Pico_5303284728FC519C-if00`
+- USB CDC device: `/dev/ttyACM0`
+- task priority: `TX=3`、`STATE=2`、`RX=1`
+
+### Queue starvation修正の確認
+
+修正前の診断runでは、常時Readyな`rx_task`がより低優先度の`state_task`をstarvationさせ、Queue容量16件の後の984件で送信が失敗した。PR #120でQueue consumerである`state_task`を`rx_task`より上位に変更した。
+
+修正後の全3runで以下を確認した。
+
+```text
+queue_valid=1000
+queue_send_fail=0
+queue_not_received=0
+queue_other_negative=0
+deadline_miss_count=0
+```
+
+修正前の診断runは正式データに含めていない。
+
+### UF2書き込みとCSV取得
+
+run 1でPicoをBOOTSELモードで接続し、修正後のFreeRTOS UF2を書き込んだ。run 2とrun 3はBOOTSELを使用せず、USBの抜き差しでPicoを通常再起動した。
+
+```bash
+udisksctl mount -b /dev/sdb1
+cp firmware/w07_rtos_jitter/build/w07_freertos_jitter.uf2 \
+  /media/pi5/RPI-RP2/
+stty -F /dev/ttyACM0 115200 raw -echo
+timeout 20s cat /dev/ttyACM0 > data/w07/freertos_run1.csv
+```
+
+`timeout`の終了コードは全runで`124`だった。firmwareがCSV出力後もUSB CDCを閉じないためであり、想定どおりである。
+
+### CSV検証結果
+
+全3runで以下を確認した。
+
+- CSVはheader 1行 + data 1000行の合計1001行
+- headerは9列
+- `mode=freertos`
+- `sample_index=1..1000`
+- `period_target_us=10000`
+- `jitter_us = delta_us - period_target_us`
+- timestamp差分と`delta_us`が一致
+- `queue_latency_us`は全1000サンプルで非負の実測値
+- Queue送信失敗と未受信は0件
+- `deadline_miss_count=0`
+- `index_errors=0`
+- `mode_period_errors=0`
+- `formula_errors=0`
+
+CSVのSHA256は以下のとおりで、全3runが独立した計測結果である。
+
+```text
+58ff1fab9f2bff7d25f2ee39b712489cfe2a6638067c56e77fdd548dd9d6d958  freertos_run1.csv
+8a0378adab53b484207cc04d05fcbdd98d7aa86abdab290cfb87c160125f13fa  freertos_run2.csv
+64c1019c8315659604ff6f8da798235a7dc833a7e9c4ac1063e0199aaa207426  freertos_run3.csv
+```
+
+計測中は`tx_task`から出力せず、timestampと1000サンプルの取得完了後に`state_task`がまとめてCSVを出力する実装である。
