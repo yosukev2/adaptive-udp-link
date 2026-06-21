@@ -32,8 +32,10 @@
 #define PERIOD_TARGET_US 10000u
 
 #define TX_TASK_PRIORITY 3u
-#define RX_TASK_PRIORITY 2u
-#define STATE_TASK_PRIORITY 1u
+// Keep the queue consumer above the continuously ready simulated RX workload.
+// taskYIELD() does not yield to lower-priority ready tasks.
+#define STATE_TASK_PRIORITY 2u
+#define RX_TASK_PRIORITY 1u
 
 #define TX_TASK_STACK_WORDS 512u
 #define RX_TASK_STACK_WORDS 512u

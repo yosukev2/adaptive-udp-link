@@ -18,10 +18,11 @@ W07 runs both firmware variants on Raspberry Pi Pico. Raspberry Pi 5 is only the
 | task | priority | responsibility | timing or blocking behavior |
 | --- | ---: | --- | --- |
 | `tx_task` | 3 | Captures 10 ms TX-event timestamps and sends event metadata to `state_task` | Highest priority; uses `xTaskDelayUntil()` for periodic timing |
-| `rx_task` | 2 | Runs simulated receive workload | Lower than TX; yields after each workload iteration |
-| `state_task` | 1 | Receives TX events, calculates queue latency, waits for completion, and prints CSV after capture | Blocks on `xQueueReceive()` and `xSemaphoreTake()` |
+| `state_task` | 2 | Receives TX events, calculates queue latency, waits for completion, and prints CSV after capture | Blocks on `xQueueReceive()` and `xSemaphoreTake()` |
+| `rx_task` | 1 | Runs simulated receive workload | Lowest-priority CPU-bound background load; yields after each workload iteration |
 
 `tx_task` is intentionally the highest-priority task so receive-side load and state handling do not preempt the timing-critical TX path.
+`state_task` is higher priority than the continuously ready `rx_task` so it can drain the TX-event queue before returning to its blocked receive state. `taskYIELD()` does not hand execution to a lower-priority ready task, so placing `rx_task` above `state_task` would starve the queue consumer and fill the 16-entry queue.
 
 ## Communication
 
