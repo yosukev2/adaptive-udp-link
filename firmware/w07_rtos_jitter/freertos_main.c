@@ -5,5 +5,4 @@
 //   This file intentionally shows the basic RTOS building blocks used here:
 //
 //     xTaskCreate()              : create independent tasks
-//     vTaskStartScheduler()      : start the RTOS scheduler
-//     xQueueCreate()             : create a
+//     vTaskStartScheduler()      : start the RTOS
