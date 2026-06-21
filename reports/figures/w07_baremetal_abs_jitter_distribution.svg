@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="520" viewBox="0 0 960 520" role="img">
+<title>W07 bare-metal absolute jitter distribution</title>
+<rect width="960" height="520" fill="#ffffff"/>
+<text x="480" y="36" text-anchor="middle" font-family="sans-serif" font-size="22" font-weight="600">W07 bare-metal absolute jitter distribution</text>
+<text x="480" y="60" text-anchor="middle" font-family="sans-serif" font-size="13" fill="#555">n=2997; bar height uses log10(count + 1)</text>
+<line x1="90" y1="415" x2="930" y2="415" stroke="#333"/>
+<line x1="90" y1="75" x2="90" y2="415" stroke="#333"/>
+<line x1="90" y1="415.0" x2="930" y2="415.0" stroke="#dddddd"/>
+<text x="80" y="419.0" text-anchor="end" font-family="sans-serif" font-size="12" fill="#555">0</text>
+<line x1="90" y1="330.0" x2="930" y2="330.0" stroke="#dddddd"/>
+<text x="80" y="334.0" text-anchor="end" font-family="sans-serif" font-size="12" fill="#555">5</text>
+<line x1="90" y1="245.0" x2="930" y2="245.0" stroke="#dddddd"/>
+<text x="80" y="249.0" text-anchor="end" font-family="sans-serif" font-size="12" fill="#555">37</text>
+<line x1="90" y1="160.0" x2="930" y2="160.0" stroke="#dddddd"/>
+<text x="80" y="164.0" text-anchor="end" font-family="sans-serif" font-size="12" fill="#555">233</text>
+<line x1="90" y1="75.0" x2="930" y2="75.0" stroke="#dddddd"/>
+<text x="80" y="79.0" text-anchor="end" font-family="sans-serif" font-size="12" fill="#555">1439</text>
+<rect x="137.0" y="75.0" width="74.0" height="340.0" fill="#d97706" rx="2"/>
+<text x="174.0" y="68.0" text-anchor="middle" font-family="sans-serif" font-size="11">1439</text>
+<text x="174.0" y="437" text-anchor="middle" font-family="sans-serif" font-size="12">881</text>
+<text x="174.0" y="457" text-anchor="middle" font-family="sans-serif" font-size="10" fill="#555">48.01%</text>
+<rect x="305.0" y="117.0" width="74.0" height="298.0" fill="#d97706" rx="2"/>
+<text x="342.0" y="110.0" text-anchor="middle" font-family="sans-serif" font-size="11">586</text>
+<text x="342.0" y="437" text-anchor="middle" font-family="sans-serif" font-size="12">882</text>
+<text x="342.0" y="457" text-anchor="middle" font-family="sans-serif" font-size="10" fill="#555">19.55%</text>
+<rect x="473.0" y="350.2" width="74.0" height="64.8" fill="#d97706" rx="2"/>
+<text x="510.0" y="343.2" text-anchor="middle" font-family="sans-serif" font-size="11">3</text>
+<text x="510.0" y="437" text-anchor="middle" font-family="sans-serif" font-size="12">889</text>
+<text x="510.0" y="457" text-anchor="middle" font-family="sans-serif" font-size="10" fill="#555">0.10%</text>
+<rect x="641.0" y="94.0" width="74.0" height="321.0" fill="#d97706" rx="2"/>
+<text x="678.0" y="87.0" text-anchor="middle" font-family="sans-serif" font-size="11">959</text>
+<text x="678.0" y="437" text-anchor="middle" font-family="sans-serif" font-size="12">1839</text>
+<text x="678.0" y="457" text-anchor="middle" font-family="sans-serif" font-size="10" fill="#555">32.00%</text>
+<rect x="809.0" y="302.9" width="74.0" height="112.1" fill="#d97706" rx="2"/>
+<text x="846.0" y="295.9" text-anchor="middle" font-family="sans-serif" font-size="11">10</text>
+<text x="846.0" y="437" text-anchor="middle" font-family="sans-serif" font-size="12">1840</text>
+<text x="846.0" y="457" text-anchor="middle" font-family="sans-serif" font-size="10" fill="#555">0.33%</text>
+<text x="510.0" y="502" text-anchor="middle" font-family="sans-serif" font-size="14">abs(jitter_us) (us)</text>
+<text x="22" y="245.0" text-anchor="middle" font-family="sans-serif" font-size="14" transform="rotate(-90 22 245.0)">sample count (log scale)</text>
+</svg>
