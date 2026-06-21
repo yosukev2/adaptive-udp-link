@@ -47,12 +47,14 @@ The usage string presents `--bind-ip` as mandatory, but the implementation defau
 
 | output | option / location | schema or contents | W08 use |
 | --- | --- | --- | --- |
-| per receive | `--csv-by-1recv-log-path` | `rcv_time_ns,seq,send_time_ns,latency_ns,missing_delta,parse_status` | Primary `runN.csv`; supports latency percentiles and sequence-gap/loss analysis. |
-| one-second statistics | `--csv-in-1sec-log-path` | `elapsed_sec,avg_latency_ms,max_latency_ms,min_latency_ms,recv_cnt,ok_recv_cnt,gap_cnt,dup_cnt,reord_cnt,pps,cpu_pct` | Auxiliary time-series diagnostics. |
-| state transition | `--state-log-path` | `link_name,trial,mono_ns,elapsed_ms,from_state,to_state,reason` | Optional; not required for a no-fault W08 baseline. |
+| per receive | `--csv-by-1recv-log-path` | 6 columns: `rcv_time_ns,seq,send_time_ns,latency_ns,missing_delta,parse_status` | Primary `runN.csv`; supports latency percentiles and sequence-gap/loss analysis. |
+| one-second statistics | `--csv-in-1sec-log-path` | 11 columns: `elapsed_sec,avg_latency_ms,max_latency_ms,min_latency_ms,recv_cnt,ok_recv_cnt,gap_cnt,dup_cnt,reord_cnt,pps,cpu_pct` | Auxiliary time-series diagnostics. |
+| state transition | `--state-log-path` | 7 columns: `link_name,trial,mono_ns,elapsed_ms,from_state,to_state,reason` | Optional; not required for a no-fault W08 baseline. |
 | text log | `--log-path` | Configuration, per-second statistics when no statistics CSV is requested, final summary, and `trial_summary` | Records P50/P95/P99/max and receive/error totals. |
 
 The per-receive CSV contains `missing_delta`, but it does not contain the TX sent total. A loss-rate calculation should retain the TX summary or use the fixed expected frame count from validated run metadata as its denominator.
+
+W08 run validation must compare each complete ordered header against these schemas and also confirm its field count. This follows the W07 analyzer's validation method; checking only that a CSV has 6 or 11 comma-separated fields would not detect renamed or reordered columns.
 
 ## Existing Controls Versus Required Work
 
