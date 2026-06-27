@@ -2,7 +2,7 @@
 //
 // 役割
 //   - UDP送信プログラム（tx）のエントリポイント
-//   - CLI引数の解析（dst-ip / dst-port / rate-hz / duration-sec / log-path）
+//   - CLI引数の解析（dst-ip / dst-port / rate-hz / duration-sec / log-path / sndbuf）
 //   - CLOCK_MONOTONIC ベースの固定レート送信ループ
 //   - Frame v1 を手動 serialize して UDP送信
 //   - ログ出力（start / summary / end）
@@ -57,6 +57,8 @@ typedef struct {
     int rate_hz;                // 送信レート（Hz）
     int duration_sec;           // 実行時間
     const char *log_path;       // ログファイルパス
+    int sndbuf;                 // SO_SNDBUF に設定する送信バッファサイズ（byte）
+    int sndbuf_set;             // --sndbuf が明示指定されたか
     int payload_len;            // 送信する payload 長（byte）
     int version;                // プロトコルバージョン（現状は v1 固定）
     int crc32_test_mode;        // ハードコードした v1 フレームで CRC32 を確認する
@@ -104,7 +106,7 @@ typedef struct {
 static void print_usage(const char *prog) {
     fprintf(stderr,
             "Usage: %s --dst-ip <ip> --dst-port <port> --rate-hz <hz> --duration-sec <sec>"
-            " --log-path <path> [--payload-len <n>] [--version <n>] [--crc32-test]"
+            " --log-path <path> [--sndbuf <bytes>] [--payload-len <n>] [--version <n>] [--crc32-test]"
             " [--fault-target preamble|payload_len|crc|payload|header] [--fault-rate 0.0-1.0]"
             " [--outage-at-sec <sec> --outage-duration-ms <ms>]\n",
             prog);
@@ -150,6 +152,7 @@ static int parse_args(int argc, char **argv, TxConfig *cfg) {
         {"fault-rate",    required_argument, 0, 10},
         {"outage-at-sec", required_argument, 0, 11},
         {"outage-duration-ms", required_argument, 0, 12},
+        {"sndbuf",        required_argument, 0, 13},
         {0, 0, 0, 0}
     };
 
@@ -243,6 +246,14 @@ static int parse_args(int argc, char **argv, TxConfig *cfg) {
                 }
                 cfg->outage_duration_ms_set = 1;
                 break;
+            case 13:
+                if (parse_int(optarg, &cfg->sndbuf) != 0) {
+                    fprintf(stderr, "Invalid --sndbuf: %s\n", optarg);
+                    print_usage(argv[0]);
+                    return -1;
+                }
+                cfg->sndbuf_set = 1;
+                break;
             default:
                 print_usage(argv[0]);
                 return -1;
@@ -260,6 +271,11 @@ static int parse_args(int argc, char **argv, TxConfig *cfg) {
     }
     if (cfg->payload_len < 0 || cfg->payload_len > FRAME_V1_PAYLOAD_MAX_BYTES) {
         fprintf(stderr, "Invalid --payload-len: %d (expected 0..%d)\n", cfg->payload_len, FRAME_V1_PAYLOAD_MAX_BYTES );
+        print_usage(argv[0]);
+        return -1;
+    }
+    if (cfg->sndbuf_set && cfg->sndbuf <= 0) {
+        fprintf(stderr, "Invalid --sndbuf: %d (expected > 0)\n", cfg->sndbuf);
         print_usage(argv[0]);
         return -1;
     }
@@ -305,6 +321,34 @@ static int open_output_files(const TxConfig *config, TxFiles *files) {
         perror("fopen(log_path)");
         return -1;
     }
+    return 0;
+}
+
+static void write_log_line(FILE *fp, const char *level, const char *msg);
+
+static int apply_socket_buffer_setting(FILE *log_fp, int sock, int optname, const char *opt_label, int requested) {
+    int value = requested;
+    socklen_t actual_len = sizeof(value);
+
+    if (setsockopt(sock, SOL_SOCKET, optname, &value, sizeof(value)) != 0) {
+        char msg[256];
+        snprintf(msg, sizeof(msg), "setsockopt failed option=%s requested=%d", opt_label, requested);
+        write_log_line(log_fp, "ERROR", msg);
+        perror(opt_label);
+        return -1;
+    }
+
+    if (getsockopt(sock, SOL_SOCKET, optname, &value, &actual_len) != 0) {
+        char msg[256];
+        snprintf(msg, sizeof(msg), "getsockopt failed option=%s requested=%d", opt_label, requested);
+        write_log_line(log_fp, "ERROR", msg);
+        perror(opt_label);
+        return -1;
+    }
+
+    char msg[256];
+    snprintf(msg, sizeof(msg), "socket buffer option=%s requested=%d actual=%d", opt_label, requested, value);
+    write_log_line(log_fp, "INFO", msg);
     return 0;
 }
 
@@ -627,6 +671,14 @@ int main(int argc, char **argv) {
         perror("socket");
         close_output_files(&files);
         return 1;
+    }
+
+    if (cfg.sndbuf_set) {
+        if (apply_socket_buffer_setting(files.log_fp, sock, SO_SNDBUF, "SO_SNDBUF", cfg.sndbuf) != 0) {
+            close(sock);
+            close_output_files(&files);
+            return 1;
+        }
     }
 
     struct sockaddr_in dest = {0};
