@@ -49,6 +49,8 @@ typedef struct {
     int port;              // bindポート
     int duration_sec;       // 実行時間（受信ループの終了条件）
     const char *log_path;  // ログファイルパス
+    int rcvbuf;            // SO_RCVBUF に設定する受信バッファサイズ（byte）
+    int rcvbuf_set;        // --rcvbuf が明示指定されたか
     const char *link_name;  // trial_summary の link 識別子（Host loopback / 実リンク名など）
     bool has_link_name;    // --link-name が明示指定されたか
     int trial;             // trial_summary の試行番号（1始まりを想定）
@@ -166,7 +168,7 @@ typedef enum {
 
 static void print_usage(const char *prog) {
     fprintf(stderr,
-            "Usage: %s --bind-ip <ip> --port <port> --duration-sec <sec> --log-path <path> [--link-name <name>] [--trial <n>] [--csv-in-1sec-log-path <path>] [--csv-by-1recv-log-path <path>] [--state-log-path <path>] [--recovery-mode fsm|timeout-only] [--crc32-test]\n",
+            "Usage: %s --bind-ip <ip> --port <port> --duration-sec <sec> --log-path <path> [--rcvbuf <bytes>] [--link-name <name>] [--trial <n>] [--csv-in-1sec-log-path <path>] [--csv-by-1recv-log-path <path>] [--state-log-path <path>] [--recovery-mode fsm|timeout-only] [--crc32-test]\n",
             prog);
 }
 
@@ -211,6 +213,7 @@ static int parse_args(int argc, char **argv, RxConfig *cfg) {
         {"state-log-path", required_argument, 0, 9},
         {"recovery-mode", required_argument, 0, 10},
         {"crc32-test", no_argument, 0, 11},
+        {"rcvbuf", required_argument, 0, 12},
         {0, 0, 0, 0}
     };
 
@@ -274,6 +277,14 @@ static int parse_args(int argc, char **argv, RxConfig *cfg) {
             case 11:
                 cfg->crc32_test_mode = 1;
                 break;
+            case 12:
+                if (parse_int(optarg, &cfg->rcvbuf) != 0) {
+                    fprintf(stderr, "Invalid --rcvbuf: %s\n", optarg);
+                    print_usage(argv[0]);
+                    return -1;
+                }
+                cfg->rcvbuf_set = 1;
+                break;
 
             default:
                 print_usage(argv[0]);
@@ -293,6 +304,12 @@ static int parse_args(int argc, char **argv, RxConfig *cfg) {
     if (cfg->recovery_mode != RX_RECOVERY_MODE_FSM &&
         cfg->recovery_mode != RX_RECOVERY_MODE_TIMEOUT_ONLY) {
         cfg->recovery_mode = RX_RECOVERY_MODE_FSM;
+    }
+
+    if (cfg->rcvbuf_set && cfg->rcvbuf <= 0) {
+        fprintf(stderr, "Invalid --rcvbuf: %d (expected > 0)\n", cfg->rcvbuf);
+        print_usage(argv[0]);
+        return -1;
     }
 
     return 0;
@@ -357,6 +374,34 @@ static int open_output_files(const RxConfig *config, RxFiles *files) {
         fflush(files->state_fp);
     }
 
+    return 0;
+}
+
+static void write_log_line(FILE *fp, const char *level, const char *msg);
+
+static int apply_socket_buffer_setting(FILE *log_fp, int sock, int optname, const char *opt_label, int requested) {
+    int value = requested;
+    socklen_t actual_len = sizeof(value);
+
+    if (setsockopt(sock, SOL_SOCKET, optname, &value, sizeof(value)) != 0) {
+        char msg[256];
+        snprintf(msg, sizeof(msg), "setsockopt failed option=%s requested=%d", opt_label, requested);
+        write_log_line(log_fp, "ERROR", msg);
+        perror(opt_label);
+        return -1;
+    }
+
+    if (getsockopt(sock, SOL_SOCKET, optname, &value, &actual_len) != 0) {
+        char msg[256];
+        snprintf(msg, sizeof(msg), "getsockopt failed option=%s requested=%d", opt_label, requested);
+        write_log_line(log_fp, "ERROR", msg);
+        perror(opt_label);
+        return -1;
+    }
+
+    char msg[256];
+    snprintf(msg, sizeof(msg), "socket buffer option=%s requested=%d actual=%d", opt_label, requested, value);
+    write_log_line(log_fp, "INFO", msg);
     return 0;
 }
 
@@ -1285,6 +1330,14 @@ int main(int argc, char **argv) {
         perror("socket");
         close_output_files(&files);
         return 1;
+    }
+
+    if (cfg.rcvbuf_set) {
+        if (apply_socket_buffer_setting(files.log_fp, sock, SO_RCVBUF, "SO_RCVBUF", cfg.rcvbuf) != 0) {
+            close(sock);
+            close_output_files(&files);
+            return 1;
+        }
     }
 
     struct pollfd pfd;
