@@ -1,51 +1,51 @@
-# W08 Common Baseline Conditions
+# W08 共通 baseline 条件
 
-## Scope
+## 対象範囲
 
-W08 measures the existing Linux UDP `tx` and `rx` programs on Raspberry Pi 5 Linux. Both processes run on the same Raspberry Pi 5 and communicate through host loopback. Raspberry Pi Pico and its firmware are not part of this experiment and must not be changed.
+W08 では、Raspberry Pi 5 Linux 上の既存 UDP `tx` / `rx` プログラムを計測対象にする。`tx` と `rx` は同じ Raspberry Pi 5 上で動かし、host loopback 経由で通信する。Raspberry Pi Pico とその firmware はこの実験の対象外であり、変更しない。
 
-The common baseline is reused as the `before` condition for the send-interval, socket-buffer, and CPU-affinity comparisons. Each `after` run changes exactly one candidate factor.
+この共通 baseline は、送信間隔、socket buffer、CPU affinity の比較で `before` 条件として使い回す。各 `after` 実験では、候補因子を 1 つだけ変える。
 
-## Baseline Condition
+## baseline 条件
 
-| category | fixed baseline value | verification or note |
+| category | 固定する baseline 値 | 確認方法または注記 |
 | --- | --- | --- |
-| target host | Raspberry Pi 5 Linux, same host for `tx` and `rx` | Record `uname -a` and the repository commit in `run_metadata.md`. |
-| Pico firmware | Not used and not changed | Do not flash, rebuild, or reconnect Pico as part of W08. |
-| network path | Host loopback; neither wired nor wireless | Physical Ethernet and Wi-Fi are outside this baseline. |
-| Linux interface | `lo` | Confirm with `ip -brief address show lo`. |
-| bind / destination IP | `127.0.0.1` / `127.0.0.1` | Keeps both timestamps in the same `CLOCK_MONOTONIC` domain. |
-| UDP port | `9000` | Same for `rx --port` and `tx --dst-port`. |
-| protocol version | Frame v1 (`--version 1`) | `tx` currently accepts only version 1. |
-| payload length | `48` bytes per frame | Pass `--payload-len 48`; one datagram contains 3 frames. |
-| send rate | `100` frames/s | Pass `--rate-hz 100`; this is a frame rate, not a datagram rate. |
-| TX duration | `60` seconds | Pass `tx --duration-sec 60`. |
-| RX duration | `62` seconds | Start `rx` first, wait 1 second, run `tx` for 60 seconds, and retain a 1-second receive tail. |
-| fault injection | Disabled | Omit `--fault-target`, `--fault-rate`, `--outage-at-sec`, and `--outage-duration-ms`. |
-| recovery mode | `fsm` | Pass `rx --recovery-mode fsm`; no outage is injected. |
-| socket buffers | Linux defaults; no `setsockopt()` override | Record `net.core.wmem_default` and `net.core.rmem_default` before the runs. |
-| CPU affinity | Unrestricted | Do not invoke `taskset` for the baseline. |
-| background load | No intentionally started load generator | Record unexpected heavy processes or invalidate the run. |
-| trials | 3 valid runs | Use trial numbers 1, 2, and 3. |
-| official latency CSV | `data/w08/baseline/runN.csv` | Use `rx --csv-by-1recv-log-path`; `N` is the trial number. |
-| auxiliary output | `data/w08/baseline/runN_rx.log`, `runN_tx.log`, `runN_1sec.csv` | Use a distinct path per run because text logs are opened in append mode. |
-| run metadata | `data/w08/baseline/run_metadata.md` | Record commands, start time, commit, kernel, buffer defaults, and validity. |
+| target host | Raspberry Pi 5 Linux、`tx` と `rx` は同一ホストで実行 | `uname -a` とリポジトリの commit を `run_metadata.md` に記録する。 |
+| Pico firmware | 使用しない、変更しない | W08 の一部として Pico を flash / rebuild / 再接続しない。 |
+| network path | host loopback のみ。有線・無線は使わない | 物理 Ethernet と Wi-Fi は baseline の対象外。 |
+| Linux interface | `lo` | `ip -brief address show lo` で確認する。 |
+| bind / destination IP | `127.0.0.1` / `127.0.0.1` | 両方の timestamp を同じ `CLOCK_MONOTONIC` 系で扱う。 |
+| UDP port | `9000` | `rx --port` と `tx --dst-port` で同じ値を使う。 |
+| protocol version | Frame v1 (`--version 1`) | `tx` は現時点で version 1 のみ受け付ける。 |
+| payload length | 1 frame あたり `48` bytes | `--payload-len 48` を指定する。1 datagram に 3 frame 入る。 |
+| send rate | `100` frames/s | `--rate-hz 100` を指定する。これは datagram rate ではなく frame rate。 |
+| TX duration | `60` seconds | `tx --duration-sec 60` を指定する。 |
+| RX duration | `62` seconds | 先に `rx` を起動し、1 秒待ってから `tx` を 60 秒実行し、最後に 1 秒分の受信 tail を残す。 |
+| fault injection | 無効 | `--fault-target`、`--fault-rate`、`--outage-at-sec`、`--outage-duration-ms` は指定しない。 |
+| recovery mode | `fsm` | `rx --recovery-mode fsm` を指定する。outage は注入しない。 |
+| socket buffers | Linux のデフォルト。`setsockopt()` で上書きしない | 実行前に `net.core.wmem_default` と `net.core.rmem_default` を記録する。 |
+| CPU affinity | 制限しない | baseline では `taskset` を使わない。 |
+| background load | 意図的な負荷生成をしない | 予期しない重いプロセスがあれば記録するか、run を invalid にする。 |
+| trials | 有効な run を 3 回 | trial number は 1, 2, 3 を使う。 |
+| official latency CSV | `data/w08/baseline/runN.csv` | `rx --csv-by-1recv-log-path` を使う。`N` は trial number。 |
+| auxiliary output | `data/w08/baseline/runN_rx.log`, `runN_tx.log`, `runN_1sec.csv` | text log は append mode なので、run ごとに別 path を使う。 |
+| run metadata | `data/w08/baseline/run_metadata.md` | コマンド、開始時刻、commit、kernel、buffer defaults、validity を記録する。 |
 
-Metadata fields such as condition name, trial number, output path, and execution timestamp may differ between runs. They are not experimental factors.
+condition 名、trial number、出力先、実行時刻などの metadata は run ごとに変わってよい。これらは実験因子ではない。
 
-## Fixed Items In Every After Condition
+## 各 after 条件で固定する項目
 
-| after condition | only allowed change | all other baseline items |
+| after condition | 変更してよい項目 | それ以外の baseline 項目 |
 | --- | --- | --- |
-| send interval | `--rate-hz` | Fixed, including loopback path, payload, durations, socket defaults, and unrestricted affinity. |
-| socket buffer | `--sndbuf` and/or `--rcvbuf` introduced by Issue #127 | Fixed, including `--rate-hz 100` and unrestricted affinity. Record requested and effective buffer sizes. |
-| CPU affinity | `taskset` CPU selection introduced by Issue #128 | Fixed, including `--rate-hz 100` and default socket buffers. |
+| send interval | `--rate-hz` | loopback path、payload、duration、socket defaults、affinity 制限なしは固定。 |
+| socket buffer | Issue #127 で導入する `--sndbuf` / `--rcvbuf` | `--rate-hz 100` と affinity 制限なしは固定。要求値と実際の buffer size を記録する。 |
+| CPU affinity | Issue #128 で導入する `taskset` による CPU 選択 | `--rate-hz 100` と socket buffer のデフォルト値は固定。 |
 
-Do not combine after conditions. In particular, a socket-buffer run must not also use `taskset`, and an affinity run must not override socket buffers.
+after 条件は組み合わせない。特に、socket-buffer run で `taskset` を併用しないこと、affinity run で socket buffer を上書きしないこと。
 
-## Command Template
+## コマンドテンプレート
 
-Run from the repository root on Raspberry Pi 5 after building `bin/tx` and `bin/rx`. Replace `N` with `1`, `2`, or `3`.
+`bin/tx` と `bin/rx` を build したあと、Raspberry Pi 5 の repository root から実行する。`N` は `1`、`2`、`3` のいずれかに置き換える。
 
 ```bash
 mkdir -p data/w08/baseline
@@ -88,9 +88,9 @@ printf 'trial=%s tx_status=%s rx_status=%s\n' \
   "$N" "$tx_status" "$rx_status"
 ```
 
-Set `N` to `1`, `2`, and `3` in turn. Removing the four paths before a run is required because the text logs are append-only and an invalid retry must not retain stale output.
+`N` を 1, 2, 3 と順に変えて実行する。run 前に 4 つの path を削除するのは必須である。text log は追記型であり、invalid な retry に stale output を残してはいけないためである。
 
-Before the first run, record the host state without changing it:
+最初の run の前に、host state を変更せずに記録する。
 
 ```bash
 date --iso-8601=seconds
@@ -100,21 +100,21 @@ ip -brief address show lo
 sysctl net.core.wmem_default net.core.rmem_default
 ```
 
-## Run Validity
+## run の有効条件
 
-A run is valid only when every item below passes.
+run が有効なのは、以下をすべて満たす場合だけである。
 
-- `tx_status=0` and `rx_status=0` are recorded after waiting for both processes. A timeout exit such as the W07 USB capture status `124` is not expected or accepted for these Linux processes.
-- `runN.csv` has the exact 6-column header `rcv_time_ns,seq,send_time_ns,latency_ns,missing_delta,parse_status` and at least one data row.
-- `runN_1sec.csv` has the exact 11-column header `elapsed_sec,avg_latency_ms,max_latency_ms,min_latency_ms,recv_cnt,ok_recv_cnt,gap_cnt,dup_cnt,reord_cnt,pps,cpu_pct` and at least one data row.
-- Header validation compares the complete ordered field list, as in the W07 analyzer. Matching only the field count is insufficient.
-- `runN_tx.log` contains `tx summary` and `tx end`; `runN_rx.log` contains `rx summary`, `rx end`, and exactly one `trial_summary link_name=w08_baseline trial=N` for the selected `N`.
-- Neither process log contains an `ERROR` entry.
-- The selected trial number `N`, the `--trial N` argument, `trial=N` in the RX summary, and all four `runN*` output paths agree. Output from another trial or an earlier retry is not accepted.
-- The metadata records the exact commands, both exit codes, start time, commit, kernel, socket-buffer defaults, and whether unexpected background load was observed.
-- No experimental condition other than the one assigned to the relevant `after` run differs from this baseline.
+- `tx_status=0` と `rx_status=0` を、両方の process 待ち合わせ後に記録していること。W07 の USB capture status `124` のような timeout exit は、この Linux process では想定しないし受け入れない。
+- `runN.csv` の header が、6 列 `rcv_time_ns,seq,send_time_ns,latency_ns,missing_delta,parse_status` と完全一致し、少なくとも 1 行の data があること。
+- `runN_1sec.csv` の header が、11 列 `elapsed_sec,avg_latency_ms,max_latency_ms,min_latency_ms,recv_cnt,ok_recv_cnt,gap_cnt,dup_cnt,reord_cnt,pps,cpu_pct` と完全一致し、少なくとも 1 行の data があること。
+- header 検証は W07 analyzer と同じく、field count だけでなく ordered field list 全体を比較すること。
+- `runN_tx.log` に `tx summary` と `tx end` が含まれ、`runN_rx.log` に `rx summary`、`rx end`、および選択した `N` に対する `trial_summary link_name=w08_baseline trial=N` がちょうど 1 回含まれること。
+- 両方の process log に `ERROR` が含まれないこと。
+- 選択した trial number `N`、`--trial N` 引数、RX summary の `trial=N`、そして 4 つの `runN*` 出力 path が一致していること。他 trial や以前の retry の出力は受け入れない。
+- metadata に、実際のコマンド、両方の exit code、開始時刻、commit、kernel、socket-buffer defaults、予期しない background load の有無が記録されていること。
+- 関連する `after` run に割り当てられた 1 つの変更以外は、この baseline から変わっていないこと。
 
-The following commands perform the schema and log checks after each run. They intentionally test both the exact header text and the resulting number of fields.
+以下のコマンドは、各 run 後に schema と log を確認するためのものです。header の文字列と field 数の両方を意図的に確認します。
 
 ```bash
 test "$tx_status" -eq 0
@@ -140,8 +140,8 @@ test "$(grep -c "trial_summary link_name=w08_baseline trial=${N} " \
 ! grep -q 'ERROR' "data/w08/baseline/run${N}_rx.log"
 ```
 
-## Excluded Conditions
+## 除外条件
 
-The W08 baseline and every one-factor comparison use only Raspberry Pi 5 host loopback. Wi-Fi, physical Ethernet, another host, and any other network namespace or virtual network path are excluded. Raspberry Pi Pico, Pico firmware, USB CDC capture, and W07 bare-metal/FreeRTOS measurements are also outside the W08 comparison target.
+W08 baseline と、各 one-factor comparison は Raspberry Pi 5 の host loopback のみを使う。Wi-Fi、物理 Ethernet、別ホスト、その他の network namespace や virtual network path は除外する。Raspberry Pi Pico、Pico firmware、USB CDC capture、W07 bare-metal / FreeRTOS の計測も W08 の比較対象外である。
 
-If any excluded path or device is used, mark the run invalid rather than interpreting it as a W08 result. Record the reason and repeat the same trial number. Invalid runs are never included in the three-run comparison.
+除外した path や device を使った場合は、それを W08 の結果として解釈せず、その run を invalid とする。理由を記録し、同じ trial number でやり直す。invalid run は 3 回の比較には含めない。
