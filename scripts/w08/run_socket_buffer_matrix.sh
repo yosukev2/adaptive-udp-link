@@ -6,7 +6,7 @@
 # send interval × SO_RCVBUF size の matrix 計測を Pi5 上で実行する。
 #
 # 方針:
-# - #130 の send interval 結果を受けて、rate_hz=10000..20000 を 2000 刻みで見る
+# - #130 の send interval 結果を受けて、低〜中負荷の代表 rate を見る
 # - socket buffer は SO_RCVBUF のみ変更する
 # - requested value と getsockopt() actual value を rx.log / metadata に残す
 # - それ以外の条件は W08 baseline / send interval sweep と揃える
@@ -19,8 +19,8 @@ cd "$ROOT_DIR"
 RUN_ROOT="data/w08/socket_buffer_matrix"
 LOG_ROOT="logs/w08/socket_buffer_matrix"
 
-RATES=(10000 12000 14000 16000 18000 20000)
-RCVBUFS=(65536 262144 1048576 4194304 8388608 16777216)
+RATES=(10000 14000 18000)
+RCVBUFS=(8192 16384 32768 49152 65536 98304)
 TRIALS=(1 2 3)
 
 BIND_IP="${BIND_IP:-127.0.0.1}"
@@ -143,3 +143,4 @@ for rate in "${RATES[@]}"; do
 done
 
 find "$RUN_ROOT" -maxdepth 1 -type f -name 'rate_*_rcvbuf_*_run*.csv' -print | sort
+
