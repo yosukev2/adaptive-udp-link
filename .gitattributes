@@ -1,0 +1,1 @@
+data/w08/send_interval/raw_logs/**/*.csv filter=lfs diff=lfs merge=lfs -text
