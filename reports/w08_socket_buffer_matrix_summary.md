@@ -84,6 +84,22 @@
 - よって #130 と #131 の差は、単純な buffer size だけでは説明できない。実行時のスケジューリング、ログ取得条件、run間の揺らぎ、または #130 側の別条件差を疑うべき。
 - latency の p95/p99 は大きく崩れていない。一方で max latency には outlier があり、tail latency の評価では平均だけでなく max/p99 を併記する必要がある。
 
+
+## heatmaps
+
+actual が kernel 上限 `425984` に丸められた列は、代表として `262144/425984` の1列に圧縮した。
+
+- missing average heatmap: `reports/figures/w08_socket_buffer_heatmap_missing_avg.png`
+- p99 latency heatmap: `reports/figures/w08_socket_buffer_heatmap_p99_latency_ms.png`
+- mean latency heatmap: `reports/figures/w08_socket_buffer_heatmap_mean_latency_ms.png`
+- heatmap source summary: `reports/w08_socket_buffer_heatmap_summary.csv`
+
+![W08 socket buffer missing avg heatmap](figures/w08_socket_buffer_heatmap_missing_avg.png)
+
+![W08 socket buffer p99 latency heatmap](figures/w08_socket_buffer_heatmap_p99_latency_ms.png)
+
+![W08 socket buffer mean latency heatmap](figures/w08_socket_buffer_heatmap_mean_latency_ms.png)
+
 ## 成果物
 
 - `scripts/w08/run_socket_buffer_matrix.sh`
