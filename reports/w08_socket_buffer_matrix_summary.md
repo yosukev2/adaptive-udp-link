@@ -7,9 +7,10 @@
 
 ## 結論
 
-- #131 全体では 192 runs を確認し、すべて `run_validity=ok`。
+- #131 全体では 300 runs を確認し、すべて `run_validity=ok`。内訳は受信buffer sweep 192 runs、送受信buffer matrix 108 runs。
 - `SO_RCVBUF` の actual は requested と一致しない。最小側では `100 / 512 / 1024` がすべて `actual=2304` に丸められ、大きい側では `262144` 以上が `actual=425984` の天井に丸められた。
 - missing は socket buffer size と単調には対応しなかった。`actual=2304` まで小さくしても #130 の大きな missing は再現していない。
+- 送信bufferも組み合わせた tx/rx matrix では、`rate_hz=18000` で missing が増える条件があり、送信bufferと受信bufferの組み合わせ依存が見えた。
 - #131 内で最も missing が大きい集計条件は `rate_hz=10000, requested=65536, actual=131072` の `missing_avg=40.0`。ただしこれは重複条件6 trialsの平均で、同じ buffer size だから必ず悪い、とは言えない。
 - p99 latency は全体として狭い範囲に収まった。最小は `0.013271 ms`、最大は `0.019710 ms` 程度で、buffer size による大きな改善・悪化は確認できない。
 - max latency は外れ値の影響を受ける。最大の集計条件は `rate_hz=10000, requested=65536, actual=131072` の `max_latency_ms_avg=12.709301 ms`。平均・p99と分けて扱う必要がある。
@@ -22,9 +23,11 @@
 | large matrix | 108 | 0 |
 | lowbuf matrix | 54 | 0 |
 | tiny sweep | 30 | 0 |
+| tx/rx matrix | 108 | 0 |
 
 - 共通条件: loopback `127.0.0.1:9000`, payload_len `48`, tx 10 sec, rx 12 sec, recovery_mode `fsm`, CPU affinity none, SO_SNDBUF default
 - rate_hz: `10000 / 12000 / 14000 / 16000 / 18000 / 20000`
+- tx/rx matrix: rate_hz `14000 / 18000`, SO_RCVBUF `8000 / 12000 / 16000`, SO_SNDBUF `2000 / 4000 / 8000 / 10000 / 12000 / 16000`
 - heatmap / 差分表では、actual が `425984` に丸められた列を代表 `262144/425984` の1列に圧縮した。
 
 ## requested と actual の事実
@@ -153,9 +156,75 @@ actual が kernel 上限 `425984` に丸められた列は、代表として `26
 
 ![W08 socket buffer mean latency heatmap](figures/w08_socket_buffer_heatmap_mean_latency_ms.png)
 
+## TX/RX buffer matrix に関する追加結果
+
+追加で、送信側 `SO_SNDBUF` と受信側 `SO_RCVBUF` を同時に変えた matrix を実施した。
+
+- total runs: 108
+- run_validity=ok: 108
+- rate_hz: `14000 / 18000`
+- SO_RCVBUF requested/actual: `8000/16000`, `12000/24000`, `16000/32000`
+- SO_SNDBUF requested/actual: `2000/4608`, `4000/8000`, `8000/16000`, `10000/20000`, `12000/24000`, `16000/32000`
+
+### TX/RX matrix: missing の事実と差
+
+missing 上位は以下。
+
+| rate_hz | rcv requested/actual | snd requested/actual | trials | missing_avg | p99_ms | max_ms |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 18000 | 8000/16000 | 16000/32000 | 3 | 347.0 | 0.014370 | 21.121339 |
+| 18000 | 12000/24000 | 12000/24000 | 3 | 294.0 | 0.014383 | 17.988513 |
+| 18000 | 12000/24000 | 16000/32000 | 3 | 288.0 | 0.015352 | 17.631617 |
+| 14000 | 8000/16000 | 8000/16000 | 3 | 127.0 | 0.016840 | 37.583350 |
+| 14000 | 12000/24000 | 2000/4608 | 3 | 122.0 | 0.015031 | 20.102280 |
+| 18000 | 16000/32000 | 10000/20000 | 3 | 97.0 | 0.015370 | 7.857550 |
+| 18000 | 12000/24000 | 2000/4608 | 3 | 49.0 | 0.015839 | 5.587120 |
+| 14000 | 8000/16000 | 2000/4608 | 3 | 22.0 | 0.015018 | 5.948824 |
+
+missing の差分として言えること:
+
+- 受信bufferだけの sweep では #130 の missing 増大を再現しなかったが、送信bufferも組み合わせると missing が増える条件が出た。
+- 特に `rate_hz=18000` では、`rcvbuf=8000/16000` と `sndbuf=16000/32000` の組み合わせで `missing_avg=347.0` と大きい。
+- 同じ `rate_hz=18000` でも全条件が悪いわけではないため、rate だけ・buffer単体だけでは説明できない。
+- `SO_SNDBUF` が大きいほど常に良い、または小さいほど常に良い、という単調な傾向は確認できない。
+
+### TX/RX matrix: latency の事実と差
+
+p99 latency 上位は以下。
+
+| rate_hz | rcv requested/actual | snd requested/actual | trials | p99_ms | missing_avg | max_ms |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 14000 | 12000/24000 | 12000/24000 | 3 | 0.018599 | 0.0 | 1.611274 |
+| 14000 | 12000/24000 | 10000/20000 | 3 | 0.017389 | 4.0 | 3.125295 |
+| 14000 | 8000/16000 | 8000/16000 | 3 | 0.016840 | 127.0 | 37.583350 |
+| 14000 | 12000/24000 | 4000/8000 | 3 | 0.016302 | 0.0 | 1.815472 |
+| 14000 | 16000/32000 | 4000/8000 | 3 | 0.016099 | 0.0 | 0.177025 |
+| 14000 | 8000/16000 | 10000/20000 | 3 | 0.016074 | 0.0 | 0.089710 |
+| 18000 | 16000/32000 | 2000/4608 | 3 | 0.015994 | 5.0 | 2.869030 |
+| 14000 | 12000/24000 | 16000/32000 | 3 | 0.015963 | 0.0 | 0.289074 |
+
+latency の差分として言えること:
+
+- p99 latency は TX/RX matrix でも概ね `0.014〜0.019 ms` の範囲で、missing の増減ほど大きくは動いていない。
+- missing 最大条件 `18000, rcv=8000/16000, snd=16000/32000` の p99 は `0.014370 ms` で、p99 latency 上位ではない。
+- 一方、p99 最大条件 `14000, rcv=12000/24000, snd=12000/24000` は `missing_avg=0.0`。missing と p99 latency は同じ方向に動かない。
+- max latency は missing が大きい条件で跳ねることがあり、tail/outlier は p99 とは別に見る必要がある。
+
+### TX/RX matrix heatmaps
+
+縦軸は `SO_SNDBUF requested/actual`、横軸は `SO_RCVBUF requested/actual`。
+
+![TX/RX rate 14000 missing avg](figures/w08_socket_buffer_txrx_rate_14000_missing_avg.png)
+
+![TX/RX rate 14000 p99 latency](figures/w08_socket_buffer_txrx_rate_14000_p99_latency_ms.png)
+
+![TX/RX rate 18000 missing avg](figures/w08_socket_buffer_txrx_rate_18000_missing_avg.png)
+
+![TX/RX rate 18000 p99 latency](figures/w08_socket_buffer_txrx_rate_18000_p99_latency_ms.png)
+
 ## #131 の判断
 
-- #130 の missing 増大は、#131 の socket buffer sweep では再現しなかった。buffer size 単独原因とは判断しない。
+- #130 の missing 増大は、受信buffer単体 sweep では再現しなかった。一方で TX/RX buffer matrix では missing が増える組み合わせがあり、buffer size 単独ではなく送信側・受信側・rate の組み合わせ依存として扱う。
 - `SO_RCVBUF` を極端に大きくしても actual が天井に張り付くため、巨大値を細かく比較する意味は薄い。
 - `requested=16384(actual=32768)` 以上を安定候補とし、それ以上の調整は performance 本命Issueで CPU affinity / rate / OS scheduling と合わせて評価する。
 
@@ -167,4 +236,5 @@ actual が kernel 上限 `425984` に丸められた列は、代表として `26
 - heatmap生成スクリプト: `scripts/analyze_w08_socket_buffer_heatmaps.py`
 - 単一レポート: `reports/w08_socket_buffer_matrix_summary.md`
 - heatmap集計CSV: `reports/w08_socket_buffer_heatmap_summary.csv`
-- raw/summary data: `data/w08/socket_buffer_matrix/`, `data/w08/socket_buffer_matrix_lowbuf/`, `data/w08/socket_buffer_tiny/`
+- raw/summary data: `data/w08/socket_buffer_matrix/`, `data/w08/socket_buffer_matrix_lowbuf/`, `data/w08/socket_buffer_tiny/`, `data/w08/socket_buffer_txrx_matrix/`
+- TX/RX matrix summary CSV: `reports/w08_socket_buffer_txrx_matrix_summary.csv`, `reports/w08_socket_buffer_txrx_matrix_aggregate_summary.csv`
