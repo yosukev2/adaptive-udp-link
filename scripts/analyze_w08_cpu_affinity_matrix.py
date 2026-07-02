@@ -525,7 +525,10 @@ def write_report(path: Path, rows: list[dict[str, object]], figures: list[Path],
     missing_top = sorted(rows, key=lambda r: float(r["missing_delta_total_avg"]), reverse=True)[:10]
     p99_top = sorted(rows, key=lambda r: float(r["p99_latency_ms_avg"]), reverse=True)[:10]
     last_edge_top = sorted(rows, key=lambda r: float(r["last_edge_minus_middle_mean_ms_avg"]), reverse=True)[:10]
-    first_edge_top = sorted(rows, key=lambda r: float(r["first_edge_minus_middle_mean_ms_avg"]), reverse=True)[:10]
+    first_edge_low_rate_rows = sorted(
+        [row for row in rows if int(row["rate_hz"]) in (5000, 10000)],
+        key=lambda r: (int(r["rate_hz"]), str(r["rx_pin"]), str(r["tx_pin"])),
+    )
 
     md: list[str] = []
     md.append("# W08 #132 CPU affinity matrix summary")
@@ -562,10 +565,10 @@ def write_report(path: Path, rows: list[dict[str, object]], figures: list[Path],
             f"`{float(row['middle_mean_latency_ms_avg']):.6f} ms`、差分 "
             f"`{float(row['last_edge_minus_middle_mean_ms_avg']):.6f} ms`。"
         )
-    if first_edge_top:
-        row = first_edge_top[0]
+    if first_edge_low_rate_rows:
+        row = max(first_edge_low_rate_rows, key=lambda r: float(r["first_edge_minus_middle_mean_ms_avg"]))
         md.append(
-            "- 先頭 edge latency の平均との差が最大なのは "
+            "- rate_hz 5,000/10,000 に限定した先頭 edge latency の平均との差が最大なのは "
             f"`rate_hz={row['rate_hz']}, rx_pin={row['rx_pin']}, tx_pin={row['tx_pin']}` で、"
             f"先頭平均 `{float(row['first_edge_mean_latency_ms_avg']):.6f} ms`、中央平均 "
             f"`{float(row['middle_mean_latency_ms_avg']):.6f} ms`、差分 "
@@ -617,12 +620,15 @@ def write_report(path: Path, rows: list[dict[str, object]], figures: list[Path],
         ("missing_delta_total_avg", "missing_avg"),
     ]))
     md.append("")
-    md.append("## 先頭 edge latency 上位")
+    md.append("## 先頭 edge latency: rate_hz 5,000/10,000")
     md.append("")
-    md.append(md_table(first_edge_top, [
+    md.append("rate_hz 5,000/10,000 に限定し、`rate_hz -> rx_pin -> tx_pin` の順で並べる。")
+    md.append("")
+    md.append(md_table(first_edge_low_rate_rows, [
         ("rate_hz", "rate_hz"),
         ("rx_pin", "rx_pin"),
         ("tx_pin", "tx_pin"),
+        ("p99_latency_ms_avg", "p99_ms_avg"),
         ("first_edge_mean_latency_ms_avg", "first_mean_ms"),
         ("middle_mean_latency_ms_avg", "middle_mean_ms"),
         ("first_edge_minus_middle_mean_ms_avg", "first_minus_middle_ms"),
