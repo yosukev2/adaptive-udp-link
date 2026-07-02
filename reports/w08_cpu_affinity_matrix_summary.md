@@ -153,3 +153,15 @@ rate_hz 5,000/10,000 に限定し、`rate_hz -> rx_pin -> tx_pin` の順で並�
 - aggregate summary: `reports/w08_cpu_affinity_matrix_aggregate.csv`
 - edge summary: `reports/w08_cpu_affinity_matrix_edge_summary.csv`
 - report: `reports/w08_cpu_affinity_matrix_summary.md`
+## 個別時系列: rate_100000_rxpin_on_txpin_off_run3
+
+対象: `rate_hz=100000`, `rx_pin=on`, `tx_pin=off`, `run=3`。
+
+- rows: 999,999
+- latency_min_ms: 0.004407
+- latency_avg_ms: 0.008795
+- latency_max_ms: 3.305764
+- missing_total: 0
+- missing_max: 0
+
+![w08_cpu_affinity_rate_100000_rxpin_on_txpin_off_run3_timeseries](figures/w08_cpu_affinity_rate_100000_rxpin_on_txpin_off_run3_timeseries.png)
