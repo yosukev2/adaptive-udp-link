@@ -48,7 +48,7 @@ W08では Linux 側遅延の支配因子候補として、send interval / socket
 ### send interval
 
 `rate_hz=120000` でも loss_rate は `0.00000000` で、p99 latency も悪化していない。
-これは Raspberry Pi 5 では少なくとも120,000Hz付近まで処理余裕があることを示す。
+これは Raspberry Pi 5 では少なくとも120,000Hz付近まで処理余裕があることを示す。`rate_hz` を上げると受信側 `poll()` の起動待ち・sleep待ちに相当する時間が短くなり、今回のloopback条件では latency が大きく改善する。
 一方で、これは「send interval を変更すると改善する」というより、「10,000Hz近辺ではsend intervalが主要な悪化要因ではない」という結果であるため、W08の採用支配因子にはしない。
 
 ### socket buffer size
