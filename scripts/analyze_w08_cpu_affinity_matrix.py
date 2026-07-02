@@ -544,6 +544,37 @@ def write_report(path: Path, rows: list[dict[str, object]], figures: list[Path],
     md.append("- default pin core: RX core 0, TX core 1")
     md.append("- socket buffer tuning: none")
     md.append("")
+    md.append("## 結論・観察")
+    md.append("")
+    if missing_top:
+        row = missing_top[0]
+        md.append(
+            "- missing 最大は "
+            f"`rate_hz={row['rate_hz']}, rx_pin={row['rx_pin']}, tx_pin={row['tx_pin']}` の "
+            f"`missing_avg={float(row['missing_delta_total_avg']):.0f}`。"
+        )
+    if last_edge_top:
+        row = last_edge_top[0]
+        md.append(
+            "- 末尾 edge latency の平均との差が最大なのは "
+            f"`rate_hz={row['rate_hz']}, rx_pin={row['rx_pin']}, tx_pin={row['tx_pin']}` で、"
+            f"末尾平均 `{float(row['last_edge_mean_latency_ms_avg']):.6f} ms`、中央平均 "
+            f"`{float(row['middle_mean_latency_ms_avg']):.6f} ms`、差分 "
+            f"`{float(row['last_edge_minus_middle_mean_ms_avg']):.6f} ms`。"
+        )
+    if first_edge_top:
+        row = first_edge_top[0]
+        md.append(
+            "- 先頭 edge latency の平均との差が最大なのは "
+            f"`rate_hz={row['rate_hz']}, rx_pin={row['rx_pin']}, tx_pin={row['tx_pin']}` で、"
+            f"先頭平均 `{float(row['first_edge_mean_latency_ms_avg']):.6f} ms`、中央平均 "
+            f"`{float(row['middle_mean_latency_ms_avg']):.6f} ms`、差分 "
+            f"`{float(row['first_edge_minus_middle_mean_ms_avg']):.6f} ms`。"
+        )
+    md.append("- 500,000 Hz では全pin条件で missing が大きく、CPU affinity の有無だけでは飽和を吸収できていない。")
+    md.append("- 5,000〜50,000 Hz では missing は基本的に 0 だが、末尾 edge latency は条件によって中央部より大きく跳ねる。#130で見えた末尾だけ遅い現象は、このmatrixでも再現している。")
+    md.append("- RX/TX の pinning は一部条件で改善するが、全指標で単調に良くなるわけではない。missing、p99、末尾edgeは分けて判断する。")
+    md.append("")
     md.append("## 集計値の意味")
     md.append("")
     md.append("- `first_edge_*`: CSV先頭側の latency。")
