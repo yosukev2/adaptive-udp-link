@@ -11,7 +11,6 @@ Outputs:
   - per-run summary CSV
   - aggregate CSV
   - heatmaps for missing / p99 latency / max latency
-  - Markdown report
 """
 
 from __future__ import annotations
@@ -88,7 +87,6 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--run-summary-csv", type=Path, default=Path("reports/w08_socket_buffer_rate_rcvbuf_run_summary.csv"))
     parser.add_argument("--aggregate-csv", type=Path, default=Path("reports/w08_socket_buffer_rate_rcvbuf_aggregate.csv"))
-    parser.add_argument("--report", type=Path, default=Path("reports/w08_socket_buffer_rate_rcvbuf_summary.md"))
     parser.add_argument("--fig-dir", type=Path, default=Path("reports/figures"))
     return parser.parse_args()
 
@@ -347,100 +345,6 @@ def markdown_table(rows: list[dict[str, object]], columns: list[tuple[str, str]]
     return "\n".join(lines)
 
 
-def write_report(path: Path, runs: list[RunSummary], rows: list[dict[str, object]], figures: list[Path]) -> None:
-    valid_runs = sum(1 for r in runs if r.run_validity == "ok")
-    missing_top = sorted(rows, key=lambda r: float(r["missing_delta_total_avg"]), reverse=True)[:10]
-    p99_top = sorted(rows, key=lambda r: float(r["p99_latency_ms_avg"]), reverse=True)[:10]
-    max_top = sorted(rows, key=lambda r: float(r["max_latency_ms_avg"]), reverse=True)[:10]
-    missing_max = missing_top[0]
-    p99_max = p99_top[0]
-
-    md: list[str] = []
-    md.append("# W08 #131 rate_hz x SO_RCVBUF matrix summary")
-    md.append("")
-    md.append("## 目的")
-    md.append("")
-    md.append("- 送信bufferは default のまま、`rate_hz` と受信 `SO_RCVBUF` の組み合わせで missing / latency がどう変わるかを見る。")
-    md.append("- highrate sweep で大きな missing が出たため、`50,000` 以下の中低rate帯を細かく確認する。")
-    md.append("")
-    md.append("## 実験データ")
-    md.append("")
-    md.append(f"- total runs: {len(runs)}")
-    md.append(f"- run_validity=ok: {valid_runs}")
-    md.append(f"- invalid runs: {len(runs) - valid_runs}")
-    md.append("- rate_hz: `50000 / 25000 / 10000 / 5000`")
-    md.append("- SO_RCVBUF requested: `1000 / 5000 / 10000 / 50000 / 100000`")
-    md.append("- SO_SNDBUF: default")
-    md.append("- fixed: loopback `127.0.0.1:9000`, payload_len `48`, tx 10 sec, rx 12 sec, recovery_mode `fsm`, CPU affinity none")
-    md.append("")
-    md.append("## 結論・観察")
-    md.append("")
-    md.append(
-        "- missing 最大は "
-        f"`rate_hz={missing_max['rate_hz']}, rcvbuf={missing_max['rcvbuf_requested']}/{missing_max['rcvbuf_actual']}` の "
-        f"`missing_avg={float(missing_max['missing_delta_total_avg']):.0f}`。"
-    )
-    md.append(
-        "- p99 latency 最大は "
-        f"`rate_hz={p99_max['rate_hz']}, rcvbuf={p99_max['rcvbuf_requested']}/{p99_max['rcvbuf_actual']}` の "
-        f"`p99={float(p99_max['p99_latency_ms_avg']):.6f} ms`。"
-    )
-    md.append("- この中低rate帯でも `SO_RCVBUF` と missing / latency は単調な関係ではない。")
-    md.append("- `requested=1000` は actual `2304` に丸められる。requested値そのものではなく actual も併記して比較する。")
-    md.append("")
-    md.append("## missing 上位")
-    md.append("")
-    md.append(markdown_table(missing_top, [
-        ("rate_hz", "rate_hz"),
-        ("rcvbuf_requested", "rcvbuf_req"),
-        ("rcvbuf_actual", "rcvbuf_actual"),
-        ("runs", "runs"),
-        ("missing_delta_total_avg", "missing_avg"),
-        ("p99_latency_ms_avg", "p99_ms_avg"),
-        ("max_latency_ms_avg", "max_ms_avg"),
-    ]))
-    md.append("")
-    md.append("## p99 latency 上位")
-    md.append("")
-    md.append(markdown_table(p99_top, [
-        ("rate_hz", "rate_hz"),
-        ("rcvbuf_requested", "rcvbuf_req"),
-        ("rcvbuf_actual", "rcvbuf_actual"),
-        ("runs", "runs"),
-        ("p99_latency_ms_avg", "p99_ms_avg"),
-        ("missing_delta_total_avg", "missing_avg"),
-        ("max_latency_ms_avg", "max_ms_avg"),
-    ]))
-    md.append("")
-    md.append("## max latency 上位")
-    md.append("")
-    md.append(markdown_table(max_top, [
-        ("rate_hz", "rate_hz"),
-        ("rcvbuf_requested", "rcvbuf_req"),
-        ("rcvbuf_actual", "rcvbuf_actual"),
-        ("runs", "runs"),
-        ("max_latency_ms_avg", "max_ms_avg"),
-        ("p99_latency_ms_avg", "p99_ms_avg"),
-        ("missing_delta_total_avg", "missing_avg"),
-    ]))
-    md.append("")
-    md.append("## Heatmaps")
-    md.append("")
-    for fig in figures:
-        rel = fig.as_posix()
-        if rel.startswith("reports/"):
-            rel = rel[len("reports/"):]
-        md.append(f"![{fig.stem}]({rel})")
-        md.append("")
-    md.append("## 成果物")
-    md.append("")
-    md.append("- run summary: `reports/w08_socket_buffer_rate_rcvbuf_run_summary.csv`")
-    md.append("- aggregate summary: `reports/w08_socket_buffer_rate_rcvbuf_aggregate.csv`")
-    md.append("- report: `reports/w08_socket_buffer_rate_rcvbuf_summary.md`")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(md), encoding="utf-8")
-
-
 def main() -> int:
     args = parse_args()
     runs = load_runs(args.data_dir)
@@ -456,12 +360,10 @@ def main() -> int:
     make_heatmap(rows, "missing_delta_total_avg", figures[0], "rate_hz x SO_RCVBUF: missing_delta_total average", "missing_delta_total average", "int")
     make_heatmap(rows, "p99_latency_ms_avg", figures[1], "rate_hz x SO_RCVBUF: p99 latency average", "p99 latency average [ms]", "float")
     make_heatmap(rows, "max_latency_ms_avg", figures[2], "rate_hz x SO_RCVBUF: max latency average", "max latency average [ms]", "float")
-    write_report(args.report, runs, rows, figures)
 
     print(f"runs={len(runs)}")
     print(f"aggregate_rows={len(rows)}")
     print(f"figures={len(figures)}")
-    print(f"report={args.report}")
     return 0
 
 
