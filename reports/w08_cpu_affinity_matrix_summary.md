@@ -164,4 +164,5 @@ rate_hz 5,000/10,000 に限定し、`rate_hz -> rx_pin -> tx_pin` の順で並�
 - missing_total: 0
 - missing_max: 0
 
+latency は対数軸、missing_delta は線形軸で表示する。`missing_delta=0` が多いため、missing_delta 側は対数化しない。
 ![w08_cpu_affinity_rate_100000_rxpin_on_txpin_off_run3_timeseries](figures/w08_cpu_affinity_rate_100000_rxpin_on_txpin_off_run3_timeseries.png)
