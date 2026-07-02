@@ -16,12 +16,19 @@
 
 ## 結論・観察
 
-- missing 最大は `rate_hz=500000, rx_pin=off, tx_pin=on` の `missing_avg=552052`。
-- 末尾 edge latency の平均との差が最大なのは `rate_hz=10000, rx_pin=on, tx_pin=on` で、末尾平均 `0.981002 ms`、中央平均 `0.010126 ms`、差分 `0.970876 ms`。
-- rate_hz 5,000/10,000 に限定した先頭 edge latency の平均との差が最大なのは `rate_hz=5000, rx_pin=on, tx_pin=on` で、先頭平均 `0.079352 ms`、中央平均 `0.010298 ms`、差分 `0.069054 ms`。
-- 500,000 Hz では全pin条件で missing が大きく、CPU affinity の有無だけでは飽和を吸収できていない。
-- 5,000〜50,000 Hz では missing は基本的に 0 だが、末尾 edge latency は条件によって中央部より大きく跳ねる。#130で見えた末尾だけ遅い現象は、このmatrixでも再現している。
-- RX/TX の pinning は一部条件で改善するが、全指標で単調に良くなるわけではない。missing、p99、末尾edgeは分けて判断する。
+- 結果：5,000〜50,000Hzではmissingは全条件で0。p99 latencyはRX pinningで改善する傾向があり、5,000Hzでは off/off=0.017394ms に対し on/off=0.012562ms、on/on=0.011179ms。\
+示唆：低〜中rateではRXを固定すると、受信側のCPU移動やwake遅延が減り、通常時latencyが安定する。latency改善の主因はRX側の実行位置安定化と考えられる。
+
+- 結果：TX pinning単独は一貫した改善ではない。5,000Hzでは off/off=0.017394ms から off/on=0.015840ms に改善したが、10,000Hzでは off/off=0.014889ms から off/on=0.016364ms に悪化した。\
+示唆：TX pinningは条件によって効くが、単独でlatencyを安定改善する要因とは言いにくい。tx_ts取得後〜sendto前のTX内部処理時間もlatencyに混入するため、TX側の評価はtimestamp位置と分けて見る必要がある。
+
+- 結果：先頭edgeは5,000/10,000Hzの全条件で中央部より遅い。first_minus_middleはおおむね0.044〜0.069msで、rx/txを両方pinしても消えていない。\
+示唆：先頭edgeはsteady-stateのCPU競合ではなく、初回受信時のpoll wake、cold cache、CPU idle復帰、kernel/loopback初回経路などのcold-start要因が支配的と考える。
+
+- 結果：末尾edgeはpinning後も残る。10,000Hzの rx_pin=on / tx_pin=on では last_mean=0.981002ms、middle_mean=0.010126ms、差分=0.970876ms。\
+示唆：末尾edgeはRXがTX終了処理にcoreを奪われた現象ではなく、TX側のtimestamp取得位置と1秒境界stats/log処理による計測アーティファクトの可能性が高い。tx_ts取得後・sendto前に処理が挟まる構造を修正して再測定すべき。
+
+
 
 ## 集計値の意味
 
