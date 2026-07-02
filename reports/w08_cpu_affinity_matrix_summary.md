@@ -153,6 +153,21 @@ rate_hz 5,000/10,000 に限定し、`rate_hz -> rx_pin -> tx_pin` の順で並�
 - aggregate summary: `reports/w08_cpu_affinity_matrix_aggregate.csv`
 - edge summary: `reports/w08_cpu_affinity_matrix_edge_summary.csv`
 - report: `reports/w08_cpu_affinity_matrix_summary.md`
+## 個別時系列: rate_50000_rxpin_on_txpin_off_run3
+
+対象: `rate_hz=50000`, `rx_pin=on`, `tx_pin=off`, `run=3`。
+
+- rows: 500,001
+- latency_min_ms: 0.003333
+- latency_avg_ms: 0.007915
+- latency_max_ms: 0.603705
+- missing_total: 0
+- missing_max: 0
+
+latency は対数軸、missing_delta は線形軸で表示する。`missing_delta=0` が多いため、missing_delta 側は対数化しない。
+
+![w08_cpu_affinity_rate_50000_rxpin_on_txpin_off_run3_timeseries](figures/w08_cpu_affinity_rate_50000_rxpin_on_txpin_off_run3_timeseries.png)
+
 ## 個別時系列: rate_100000_rxpin_on_txpin_off_run3
 
 対象: `rate_hz=100000`, `rx_pin=on`, `tx_pin=off`, `run=3`。
