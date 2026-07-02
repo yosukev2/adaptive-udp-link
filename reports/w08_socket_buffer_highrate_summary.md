@@ -16,13 +16,20 @@
 
 ## 結論・観察
 
-- 送信buffer default 条件では、missing 最大は `rate_hz=1000000, rcvbuf=16000/32000` の `missing_avg=176153`。
-- 送信buffer default 条件の p99 latency 最大は `rate_hz=200000, rcvbuf=100000/200000` の `p99=0.382719 ms`。
-- TX/RX 明示条件では、missing 最大は `rate_hz=140000, rcvbuf=8000/16000, sndbuf=10000/20000` の `missing_avg=19202`。
-- TX/RX 明示条件の p99 latency 最大は `rate_hz=180000, rcvbuf=12000/24000, sndbuf=12000/24000` の `p99=0.133118 ms`。
-- missing と p99 latency は同じ条件で最大化していない。gap 発生量と通常受信時の tail latency は分けて見る必要がある。
-- `SO_RCVBUF` を大きくすれば常に改善する、または小さくすれば常に悪化する、という単調な傾向はこの highrate 結果からは言えない。
-- `rate_hz=500000` 以上では missing が大きく出る条件が増え、buffer size よりも処理飽和・スケジューリング・送受信処理の競合が支配的になっている可能性が高い。
+- 結果：
+低rateの 5,000/10,000Hz では、missingなし条件の p99 latency はおおむね 0.015〜0.017 ms に収まり、SO_RCVBUF の大小による差は小さい。
+示唆：
+今回の payload_len=48 かつ受信処理が軽い条件では、受信キュー滞留が latency を支配しているとは言いにくく、p99 の差はスケジューリング揺らぎ・測定ノイズの影響が大きい可能性が高い。
+
+- 結果：
+TX/RX明示条件では、送信バッファが大きく受信バッファが小さい条件で missing が増える例がある。例として rate=180,000Hz、rcvbuf=8,000/16,000、sndbuf=16,000/32,000 では missing_avg=7,178。
+示唆：
+送信側が一時的に多く吐ける一方で受信側の受け皿が小さいと、RXが瞬間的に遅れたときにsocket queueを吸収しきれず、sequence gap が発生しやすい。
+
+- 結果：
+追加の rate×SO_RCVBUF 実験では、50,000Hzで rcvbuf=5,000/10,000 の missing_avg=1,819 に対し、rcvbuf=50,000/100,000 では missing_avg=0 まで低下した。
+示唆：
+受信バッファを十分大きくすると、短時間のRX遅れをdropではなくqueueで吸収できるため、missingは抑制される。ただし全条件で単調減少ではないため、buffer sizeだけを支配要因とは見なさない。
 
 ## 主要な見方
 
