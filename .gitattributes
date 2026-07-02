@@ -1,1 +1,2 @@
 data/w08/socket_buffer_txrx_highrate/rate_*_rcvbuf_*_sndbuf_*_run*.csv filter=lfs diff=lfs merge=lfs -text
+data/w08/socket_buffer_rate_rcvbuf_matrix/rate_*_rcvbuf_*_sndbuf_default_run*.csv filter=lfs diff=lfs merge=lfs -text
