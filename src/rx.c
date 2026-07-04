@@ -16,6 +16,7 @@
 
 #include "frame.h"
 #include "frame_v1_wire.h"
+#include "feedback_v1_wire.h"
 
 static int now_process_cpu_ns(uint64_t *out_ns);
 static void normalize_trial_summary_link_name(const char *link_name, char *out, size_t out_size);
@@ -57,6 +58,9 @@ typedef struct {
     const char *csv_in_1sec_log_path;  // １秒ごとの統計ログ（rx_stats）をCSV形式で出力する場合のファイルパス（オプション、未指定ならCSV出力しない）
     const char *csv_by_1recv_log_path;  // 受信ごとの統計ログ（rx_stats）をCSV形式で出力する場合のファイルパス（オプション、未指定ならCSV出力しない）
     const char *state_log_path;  // FSM 状態遷移をCSV形式で出力する場合のファイルパス（オプション、未指定ならCSV出力しない）
+    const char *feedback_dst_ip;  // RX 1秒window統計を送るfeedback UDPの宛先IP
+    int feedback_dst_port;        // RX 1秒window統計を送るfeedback UDPの宛先port
+    bool feedback_enabled;        // --feedback-dst-ip と --feedback-dst-port が揃ったときだけ送信する
     int recovery_mode;  // W05 の復旧モード（0=fsm, 1=timeout-only）
     int crc32_test_mode;  // ハードコードした v1 フレームで CRC32 を確認する
 } RxConfig;
@@ -109,6 +113,10 @@ typedef struct {
     uint64_t latency_sample_cnt;
     uint64_t max_latency_ns;
     uint64_t min_latency_ns;
+    uint64_t *latency_samples_ns;
+    size_t latency_samples_len;
+    size_t latency_samples_cap;
+    bool latency_samples_oom;
 } WindowStats;
 
 typedef struct {
@@ -130,6 +138,7 @@ typedef struct {
     double pps_in_1sec;
     double cpu_pct_in_1sec;
     WindowStats win_stats[2];
+    uint32_t feedback_seq;
 } RxTimingState;
 
 typedef enum {
@@ -167,7 +176,7 @@ typedef enum {
 
 static void print_usage(const char *prog) {
     fprintf(stderr,
-            "Usage: %s --bind-ip <ip> --port <port> --duration-sec <sec> --log-path <path> [--rcvbuf <bytes>] [--link-name <name>] [--trial <n>] [--csv-in-1sec-log-path <path>] [--csv-by-1recv-log-path <path>] [--state-log-path <path>] [--recovery-mode fsm|timeout-only] [--crc32-test]\n",
+            "Usage: %s --bind-ip <ip> --port <port> --duration-sec <sec> --log-path <path> [--rcvbuf <bytes>] [--link-name <name>] [--trial <n>] [--csv-in-1sec-log-path <path>] [--csv-by-1recv-log-path <path>] [--state-log-path <path>] [--feedback-dst-ip <ip> --feedback-dst-port <port>] [--recovery-mode fsm|timeout-only] [--crc32-test]\n",
             prog);
 }
 
@@ -213,6 +222,8 @@ static int parse_args(int argc, char **argv, RxConfig *cfg) {
         {"recovery-mode", required_argument, 0, 10},
         {"crc32-test", no_argument, 0, 11},
         {"rcvbuf", required_argument, 0, 12},
+        {"feedback-dst-ip", required_argument, 0, 13},
+        {"feedback-dst-port", required_argument, 0, 14},
         {0, 0, 0, 0}
     };
 
@@ -284,6 +295,16 @@ static int parse_args(int argc, char **argv, RxConfig *cfg) {
                 }
                 cfg->rcvbuf_set = 1;
                 break;
+            case 13:
+                cfg->feedback_dst_ip = optarg;
+                break;
+            case 14:
+                if (parse_int(optarg, &cfg->feedback_dst_port) != 0) {
+                    fprintf(stderr, "Invalid --feedback-dst-port: %s\n", optarg);
+                    print_usage(argv[0]);
+                    return -1;
+                }
+                break;
 
             default:
                 print_usage(argv[0]);
@@ -310,6 +331,19 @@ static int parse_args(int argc, char **argv, RxConfig *cfg) {
         print_usage(argv[0]);
         return -1;
     }
+
+    if ((cfg->feedback_dst_ip && cfg->feedback_dst_port <= 0) ||
+        (!cfg->feedback_dst_ip && cfg->feedback_dst_port > 0)) {
+        fprintf(stderr, "--feedback-dst-ip and --feedback-dst-port must be specified together\n");
+        print_usage(argv[0]);
+        return -1;
+    }
+    if (cfg->feedback_dst_port < 0 || cfg->feedback_dst_port > 65535) {
+        fprintf(stderr, "Invalid --feedback-dst-port: %d\n", cfg->feedback_dst_port);
+        print_usage(argv[0]);
+        return -1;
+    }
+    cfg->feedback_enabled = cfg->feedback_dst_ip && cfg->feedback_dst_port > 0;
 
     return 0;
 }
@@ -835,6 +869,23 @@ static int now_monotonic_ns(uint64_t *out_ns) {
     return 0;
 }
 
+static int build_ipv4_addr(const char *ip, int port, struct sockaddr_in *out) {
+    memset(out, 0, sizeof(*out));
+    out->sin_family = AF_INET;
+    out->sin_port = htons((uint16_t)port);
+
+    int rc = inet_pton(AF_INET, ip, &out->sin_addr);
+    if (rc != 1) {
+        if (rc == 0) {
+            fprintf(stderr, "Invalid IPv4 address: %s\n", ip);
+        } else {
+            perror("inet_pton");
+        }
+        return -1;
+    }
+    return 0;
+}
+
 static int build_bind_addr(const char *ip, int port, struct sockaddr_in *out) {
     memset(out, 0, sizeof(*out));
     out->sin_family = AF_INET;
@@ -890,6 +941,147 @@ static void update_seq_stats(
     }
 }
 
+
+static int compare_u64_for_qsort(const void *a, const void *b) {
+    const uint64_t va = *(const uint64_t *)a;
+    const uint64_t vb = *(const uint64_t *)b;
+    if (va < vb) return -1;
+    if (va > vb) return 1;
+    return 0;
+}
+
+static uint32_t clamp_u64_to_u32(uint64_t v) {
+    return (v > UINT32_MAX) ? UINT32_MAX : (uint32_t)v;
+}
+
+static void reset_window_stats(WindowStats *win) {
+    if (!win) {
+        return;
+    }
+    free(win->latency_samples_ns);
+    *win = (WindowStats){0};
+}
+
+static void free_timing_windows(RxTimingState *ts) {
+    if (!ts) {
+        return;
+    }
+    reset_window_stats(&ts->win_stats[0]);
+    reset_window_stats(&ts->win_stats[1]);
+}
+
+static void append_window_latency_sample(WindowStats *win, uint64_t latency_ns) {
+    uint64_t *new_buf = NULL;
+    size_t new_cap = 0;
+
+    if (!win || win->latency_samples_oom) {
+        return;
+    }
+    if (win->latency_samples_len == win->latency_samples_cap) {
+        new_cap = (win->latency_samples_cap == 0) ? 256 : win->latency_samples_cap * 2;
+        new_buf = realloc(win->latency_samples_ns, new_cap * sizeof(new_buf[0]));
+        if (!new_buf) {
+            win->latency_samples_oom = true;
+            return;
+        }
+        win->latency_samples_ns = new_buf;
+        win->latency_samples_cap = new_cap;
+    }
+    win->latency_samples_ns[win->latency_samples_len++] = latency_ns;
+}
+
+static uint64_t window_latency_p99_ns(WindowStats *win) {
+    size_t idx = 0;
+
+    if (!win || win->latency_samples_len == 0 || !win->latency_samples_ns) {
+        return 0;
+    }
+    qsort(win->latency_samples_ns, win->latency_samples_len, sizeof(win->latency_samples_ns[0]), compare_u64_for_qsort);
+    idx = (win->latency_samples_len * 99 + 99) / 100;
+    if (idx == 0) {
+        idx = 1;
+    }
+    idx -= 1;
+    if (idx >= win->latency_samples_len) {
+        idx = win->latency_samples_len - 1;
+    }
+    return win->latency_samples_ns[idx];
+}
+
+static uint32_t missing_rate_ppm_from_window(uint64_t recv_ok, uint64_t missing_delta) {
+    uint64_t denom = recv_ok + missing_delta;
+    if (denom == 0) {
+        denom = 1;
+    }
+    return clamp_u64_to_u32((missing_delta * UINT64_C(1000000)) / denom);
+}
+
+static int send_feedback_window(
+    int feedback_sock,
+    const struct sockaddr_in *feedback_addr,
+    const RxFiles *files,
+    RxTimingState *ts,
+    WindowStats *win
+) {
+    uint8_t wire[FEEDBACK_V1_WIRE_LEN];
+    size_t wire_len = 0;
+    FeedbackV1Packet packet = {0};
+    uint64_t p99_ns = 0;
+    char msg[256];
+    ssize_t sent = 0;
+
+    if (feedback_sock < 0 || !feedback_addr || !ts || !win) {
+        return 0;
+    }
+
+    p99_ns = window_latency_p99_ns(win);
+    packet.feedback_version = FEEDBACK_V1_VERSION;
+    packet.header_len = FEEDBACK_V1_HEADER_LEN;
+    packet.flags = 0;
+    packet.feedback_seq = ts->feedback_seq;
+    packet.window_start_ns = ts->last_stats_wall_ns;
+    packet.window_end_ns = ts->next_stats_ns;
+    packet.recv_ok = clamp_u64_to_u32(win->recv_ok);
+    packet.missing_delta = clamp_u64_to_u32(win->gap_cnt);
+    packet.missing_rate_ppm = missing_rate_ppm_from_window(win->recv_ok, win->gap_cnt);
+    packet.p99_latency_us = clamp_u64_to_u32(p99_ns / UINT64_C(1000));
+
+    if (feedback_v1_build(&packet, wire, sizeof(wire), &wire_len) != 0) {
+        write_log_line(files ? files->log_fp : NULL, "ERROR", "feedback_v1_build failed");
+        return -1;
+    }
+
+    sent = sendto(feedback_sock, wire, wire_len, 0, (const struct sockaddr *)feedback_addr, sizeof(*feedback_addr));
+    if (sent < 0) {
+        snprintf(msg, sizeof(msg),
+                 "feedback send failed seq=%lu errno=%d",
+                 (unsigned long)packet.feedback_seq,
+                 errno);
+        write_log_line(files ? files->log_fp : NULL, "WARN", msg);
+        return -1;
+    }
+    if ((size_t)sent != wire_len) {
+        snprintf(msg, sizeof(msg),
+                 "feedback send short seq=%lu sent=%zd expected=%zu",
+                 (unsigned long)packet.feedback_seq,
+                 sent,
+                 wire_len);
+        write_log_line(files ? files->log_fp : NULL, "WARN", msg);
+        return -1;
+    }
+
+    snprintf(msg, sizeof(msg),
+             "feedback sent seq=%lu recv_ok=%lu missing_delta=%lu missing_rate_ppm=%lu p99_latency_us=%lu",
+             (unsigned long)packet.feedback_seq,
+             (unsigned long)packet.recv_ok,
+             (unsigned long)packet.missing_delta,
+             (unsigned long)packet.missing_rate_ppm,
+             (unsigned long)packet.p99_latency_us);
+    write_log_line(files ? files->log_fp : NULL, "INFO", msg);
+    ts->feedback_seq++;
+    return 0;
+}
+
 static void update_latency_stats(
     uint64_t tx_ts_ns,
     RxTotals *totals,
@@ -911,6 +1103,7 @@ static void update_latency_stats(
             totals->min_latency_ns = ts->latency;
         }
         append_latency_sample(totals, ts->latency);
+        append_window_latency_sample(win, ts->latency);
         if (ts->latency > win->max_latency_ns) {
             win->max_latency_ns = ts->latency;
         }
@@ -1327,6 +1520,9 @@ int main(int argc, char **argv) {
     if (files.csv_in_1sec_fp) printf("csv_in_1sec_log_path=%s\n", cfg.csv_in_1sec_log_path);
     if (files.csv_by_1recv_fp) printf("csv_by_1recv_log_path=%s\n", cfg.csv_by_1recv_log_path);
 
+    int feedback_sock = -1;
+    struct sockaddr_in feedback_addr = {0};
+
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0) {
         perror("socket");
@@ -1354,8 +1550,33 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    if (cfg.feedback_enabled) {
+        feedback_sock = socket(AF_INET, SOCK_DGRAM, 0);
+        if (feedback_sock < 0) {
+            perror("feedback socket");
+            close(sock);
+            close_output_files(&files);
+            return 1;
+        }
+        if (build_ipv4_addr(cfg.feedback_dst_ip, cfg.feedback_dst_port, &feedback_addr) != 0) {
+            close(feedback_sock);
+            close(sock);
+            close_output_files(&files);
+            return 1;
+        }
+        snprintf(buf, sizeof(buf),
+                 "feedback enabled dst=%s:%d format=v1 len=%u",
+                 cfg.feedback_dst_ip,
+                 cfg.feedback_dst_port,
+                 FEEDBACK_V1_WIRE_LEN);
+        write_log_line(files.log_fp, "INFO", buf);
+    }
+
     if (bind(sock, (struct sockaddr *)&bind_addr, sizeof(bind_addr)) != 0) {
         perror("bind");
+        if (feedback_sock >= 0) {
+            close(feedback_sock);
+        }
         close(sock);
         close_output_files(&files);
         return 1;
@@ -1492,9 +1713,10 @@ int main(int argc, char **argv) {
             ts.cur_idx = ts.win_idx % 2;
             evaluate_fsm_window(&files, &cfg, &ts, &ts.win_stats[ts.cur_idx], &link_fsm, ts.next_stats_ns);
             write_log_per_1sec(&files, &ts, &ts.win_stats[ts.cur_idx]);
+            send_feedback_window(feedback_sock, &feedback_addr, &files, &ts, &ts.win_stats[ts.cur_idx]);
 
             ts.next_stats_ns += 1000000000ULL;
-            ts.win_stats[ts.cur_idx] = (WindowStats){0};
+            reset_window_stats(&ts.win_stats[ts.cur_idx]);
             ts.win_idx++;
         }
     }
@@ -1513,8 +1735,12 @@ int main(int argc, char **argv) {
     }
 
     close_output_files(&files);
+    if (feedback_sock >= 0) {
+        close(feedback_sock);
+    }
     close(sock);
     free(totals.latency_samples_ns);
+    free_timing_windows(&ts);
 
     printf("rx finished\n");
     return 0;
