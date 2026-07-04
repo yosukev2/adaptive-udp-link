@@ -17,6 +17,7 @@
 #include "frame.h"
 #include "frame_v1_wire.h"
 #include "feedback_v1_wire.h"
+#include "fec_v1_wire.h"
 
 static int now_process_cpu_ns(uint64_t *out_ns);
 static void normalize_trial_summary_link_name(const char *link_name, char *out, size_t out_size);
@@ -62,6 +63,7 @@ typedef struct {
     int feedback_dst_port;        // RX 1秒window統計を送るfeedback UDPの宛先port
     bool feedback_enabled;        // --feedback-dst-ip と --feedback-dst-port が揃ったときだけ送信する
     bool retransmit_request_enabled;  // feedbackにmissing rangeを載せて再送要求する
+    bool fec_enabled;                  // FEC datagram headerをparseしてXOR recoveryを行う
     int recovery_mode;  // W05 の復旧モード（0=fsm, 1=timeout-only）
     int crc32_test_mode;  // ハードコードした v1 フレームで CRC32 を確認する
 } RxConfig;
@@ -95,6 +97,11 @@ typedef struct {
     uint64_t unique_received_frames_total;
     uint64_t duplicate_frames_total;
     uint64_t recovered_by_retransmit_count;
+    uint64_t fec_raw_missing_frames;
+    uint64_t recovered_by_fec_count;
+    uint64_t unrecovered_by_fec_count;
+    uint64_t fec_recovered_datagrams;
+    uint64_t fec_unrecovered_datagrams;
     uint64_t min_latency_ns;
     uint64_t max_latency_ns;
     uint64_t *latency_samples_ns;
@@ -178,11 +185,29 @@ typedef enum {
 #define RX_FSM_RECOVER_GOOD_WINDOWS UINT64_C(2)
 
 #define RX_STREAM_BUF_CAP (FRAME_V1_MAX_WIRE_BYTES * 4)
+#define RX_FEC_BLOCK_CAP 128
+#define RX_FEC_DATAGRAM_MAX_BYTES (FRAME_V1_MAX_WIRE_BYTES * 3)
 
 typedef struct {
     uint8_t data[RX_STREAM_BUF_CAP];
     size_t  len;   // バッファに溜まっているバイト数
 } RxStreamBuf;
+
+typedef struct {
+    uint32_t block_id;
+    uint32_t first_seq;
+    size_t payload_len;
+    bool active;
+    bool completed;
+    bool data_present[FEC_V1_K_FIXED];
+    bool parity_present;
+    uint8_t data[FEC_V1_K_FIXED][RX_FEC_DATAGRAM_MAX_BYTES];
+    uint8_t parity[RX_FEC_DATAGRAM_MAX_BYTES];
+} RxFecBlock;
+
+typedef struct {
+    RxFecBlock blocks[RX_FEC_BLOCK_CAP];
+} RxFecState;
 
 typedef enum {
     FRAMER_OK        = 0,  // フレーム抽出成功。out に格納済み・バッファ消費済み
@@ -192,7 +217,7 @@ typedef enum {
 
 static void print_usage(const char *prog) {
     fprintf(stderr,
-            "Usage: %s --bind-ip <ip> --port <port> --duration-sec <sec> --log-path <path> [--rcvbuf <bytes>] [--link-name <name>] [--trial <n>] [--csv-in-1sec-log-path <path>] [--csv-by-1recv-log-path <path>] [--state-log-path <path>] [--feedback-dst-ip <ip> --feedback-dst-port <port>] [--retransmit-request off|on] [--recovery-mode fsm|timeout-only] [--crc32-test]\n",
+            "Usage: %s --bind-ip <ip> --port <port> --duration-sec <sec> --log-path <path> [--rcvbuf <bytes>] [--link-name <name>] [--trial <n>] [--csv-in-1sec-log-path <path>] [--csv-by-1recv-log-path <path>] [--state-log-path <path>] [--feedback-dst-ip <ip> --feedback-dst-port <port>] [--retransmit-request off|on] [--fec-mode off|xor] [--recovery-mode fsm|timeout-only] [--crc32-test]\n",
             prog);
 }
 
@@ -241,6 +266,7 @@ static int parse_args(int argc, char **argv, RxConfig *cfg) {
         {"feedback-dst-ip", required_argument, 0, 13},
         {"feedback-dst-port", required_argument, 0, 14},
         {"retransmit-request", required_argument, 0, 15},
+        {"fec-mode", required_argument, 0, 16},
         {0, 0, 0, 0}
     };
 
@@ -329,6 +355,17 @@ static int parse_args(int argc, char **argv, RxConfig *cfg) {
                     cfg->retransmit_request_enabled = false;
                 } else {
                     fprintf(stderr, "Invalid --retransmit-request: %s\n", optarg);
+                    print_usage(argv[0]);
+                    return -1;
+                }
+                break;
+            case 16:
+                if (strcmp(optarg, "xor") == 0) {
+                    cfg->fec_enabled = true;
+                } else if (strcmp(optarg, "off") == 0) {
+                    cfg->fec_enabled = false;
+                } else {
+                    fprintf(stderr, "Invalid --fec-mode: %s (expected off|xor)\n", optarg);
                     print_usage(argv[0]);
                     return -1;
                 }
@@ -656,7 +693,7 @@ static void transition_link_state(
 }
 
 static void write_summary(const RxFiles *files, const RxTotals *totals, uint64_t elapsed_ns) {
-    char msg[512];
+    char msg[2048];
 
     if (!files || !files->log_fp || !totals) {
         return;
@@ -674,7 +711,8 @@ static void write_summary(const RxFiles *files, const RxTotals *totals, uint64_t
         " max_latency_ms=%llu min_latency_ms=%llu"
         " gap_cnt=%llu dup_cnt=%llu reord_cnt=%llu"
         " future_ts_cnt=%llu future_ts_detected=%llu"
-        " retransmit_metrics unique_received_frames_total=%llu duplicate_frames_total=%llu recovered_by_retransmit_count=%llu effective_missing_total=%llu effective_missing_rate=%.6f",
+        " retransmit_metrics unique_received_frames_total=%llu duplicate_frames_total=%llu recovered_by_retransmit_count=%llu effective_missing_total=%llu effective_missing_rate=%.6f"
+        " fec_metrics fec_raw_missing_frames=%llu recovered_by_fec_count=%llu unrecovered_by_fec_count=%llu fec_recovered_datagrams=%llu fec_unrecovered_datagrams=%llu fec_effective_missing_total=%llu fec_effective_missing_rate=%.6f",
         (unsigned long long)totals->recv_any,
         (unsigned long long)totals->recv_ok,
         (unsigned long long)totals->bad_size,
@@ -702,6 +740,15 @@ static void write_summary(const RxFiles *files, const RxTotals *totals, uint64_t
         (unsigned long long)(totals->gap_cnt > totals->recovered_by_retransmit_count ? totals->gap_cnt - totals->recovered_by_retransmit_count : 0),
         (totals->unique_received_frames_total + (totals->gap_cnt > totals->recovered_by_retransmit_count ? totals->gap_cnt - totals->recovered_by_retransmit_count : 0) > 0)
             ? (double)(totals->gap_cnt > totals->recovered_by_retransmit_count ? totals->gap_cnt - totals->recovered_by_retransmit_count : 0) / (double)(totals->unique_received_frames_total + (totals->gap_cnt > totals->recovered_by_retransmit_count ? totals->gap_cnt - totals->recovered_by_retransmit_count : 0))
+            : 0.0,
+        (unsigned long long)totals->fec_raw_missing_frames,
+        (unsigned long long)totals->recovered_by_fec_count,
+        (unsigned long long)totals->unrecovered_by_fec_count,
+        (unsigned long long)totals->fec_recovered_datagrams,
+        (unsigned long long)totals->fec_unrecovered_datagrams,
+        (unsigned long long)(totals->fec_raw_missing_frames > totals->recovered_by_fec_count ? totals->fec_raw_missing_frames - totals->recovered_by_fec_count : 0),
+        (totals->unique_received_frames_total + (totals->fec_raw_missing_frames > totals->recovered_by_fec_count ? totals->fec_raw_missing_frames - totals->recovered_by_fec_count : 0) > 0)
+            ? (double)(totals->fec_raw_missing_frames > totals->recovered_by_fec_count ? totals->fec_raw_missing_frames - totals->recovered_by_fec_count : 0) / (double)(totals->unique_received_frames_total + (totals->fec_raw_missing_frames > totals->recovered_by_fec_count ? totals->fec_raw_missing_frames - totals->recovered_by_fec_count : 0))
             : 0.0
     );
 
@@ -1230,13 +1277,13 @@ static void update_latency_stats(
     }
 }
 
-static void write_per_recv_csv(const RxFiles *files, const RxTimingState *ts, uint32_t seq_value, uint64_t tx_ts_ns) {
+static void write_per_recv_csv(const RxFiles *files, const RxTimingState *ts, uint32_t seq_value, uint64_t tx_ts_ns, const char *parse_status) {
     char msg_csv_by_1recv[256];
     if (files->csv_by_1recv_fp) {
         snprintf(msg_csv_by_1recv, sizeof(msg_csv_by_1recv),
-            "%llu,%lu,%llu,%llu,%llu,OK\n",
+            "%llu,%lu,%llu,%llu,%llu,%s\n",
             (unsigned long long)ts->recv_now_ns, (unsigned long)seq_value, (unsigned long long)tx_ts_ns,
-            (unsigned long long)ts->latency, (unsigned long long)ts->gap
+            (unsigned long long)ts->latency, (unsigned long long)ts->gap, parse_status ? parse_status : "OK"
             );
         fprintf(files->csv_by_1recv_fp, "%s", msg_csv_by_1recv);
         fflush(files->csv_by_1recv_fp);
@@ -1552,6 +1599,217 @@ static void evaluate_fsm_window(
     fsm->consecutive_good_windows = 0;
 }
 
+
+static void process_parsed_frame_common(
+    const RxFiles *files,
+    const RxConfig *cfg,
+    FrameV1Parsed *parsed,
+    ReceivedSeqTracker *received_tracker,
+    SeqState *seq_state,
+    RxTotals *totals,
+    RxTimingState *ts,
+    WindowStats *win,
+    RxLinkFsm *link_fsm,
+    const char *parse_status,
+    bool fec_recovered
+) {
+    bool was_seen = false;
+    bool is_recovered = false;
+
+    if (mark_received_seq(received_tracker, parsed->header.seq, &was_seen, &is_recovered) == 0) {
+        if (was_seen) {
+            totals->duplicate_frames_total++;
+        } else {
+            totals->unique_received_frames_total++;
+            if (fec_recovered) {
+                totals->recovered_by_fec_count++;
+            } else if (is_recovered) {
+                totals->recovered_by_retransmit_count++;
+            }
+        }
+    }
+    update_seq_stats(parsed->header.seq, seq_state, totals, ts, win);
+    update_latency_stats(parsed->header.tx_ts, totals, ts, win);
+    write_per_recv_csv(files, ts, parsed->header.seq, parsed->header.tx_ts, parse_status);
+
+    totals->recv_ok++;
+    win->recv_ok++;
+    on_recv_ok_for_fsm(files, cfg, ts, link_fsm, win->recv_ok);
+}
+
+static void process_frame_payload_bytes(
+    const uint8_t *payload,
+    size_t payload_len,
+    const RxFiles *files,
+    const RxConfig *cfg,
+    ReceivedSeqTracker *received_tracker,
+    SeqState *seq_state,
+    RxTotals *totals,
+    RxTimingState *ts,
+    WindowStats *win,
+    RxLinkFsm *link_fsm,
+    const char *parse_status,
+    bool fec_recovered
+) {
+    RxStreamBuf local_buf = {0};
+    FrameV1Parsed parsed = {0};
+    char msg[256];
+    const char *event_type = NULL;
+
+    if (rx_buf_append(&local_buf, payload, payload_len) != 0) {
+        write_log_line(files ? files->log_fp : NULL, "WARN", "FEC payload exceeds local stream buffer");
+        return;
+    }
+
+    for (;;) {
+        FramerResult fr = rx_framer_step(&local_buf, &parsed, totals, files ? files->log_fp : NULL, msg, sizeof(msg), &event_type);
+        if (fr == FRAMER_NEED_MORE) {
+            break;
+        }
+        if (fr == FRAMER_RESYNCED) {
+            write_fault_csv(files, ts->recv_now_ns, event_type);
+            continue;
+        }
+        process_parsed_frame_common(
+            files, cfg, &parsed, received_tracker, seq_state, totals, ts, win, link_fsm,
+            parse_status, fec_recovered
+        );
+    }
+}
+
+static RxFecBlock *fec_get_block(RxFecState *state, const FecV1Header *header) {
+    RxFecBlock *block = NULL;
+    size_t idx = 0;
+
+    if (!state || !header) {
+        return NULL;
+    }
+    idx = (size_t)(header->block_id % RX_FEC_BLOCK_CAP);
+    block = &state->blocks[idx];
+    if (!block->active || block->block_id != header->block_id) {
+        *block = (RxFecBlock){0};
+        block->active = true;
+        block->block_id = header->block_id;
+        block->first_seq = header->first_seq;
+        block->payload_len = header->payload_len;
+    }
+    return block;
+}
+
+static void fec_try_recover_block(
+    RxFecBlock *block,
+    const RxFiles *files,
+    const RxConfig *cfg,
+    ReceivedSeqTracker *received_tracker,
+    SeqState *seq_state,
+    RxTotals *totals,
+    RxTimingState *ts,
+    WindowStats *win,
+    RxLinkFsm *link_fsm
+) {
+    int missing_count = 0;
+    int missing_index = -1;
+    uint8_t recovered[RX_FEC_DATAGRAM_MAX_BYTES];
+
+    if (!block || block->completed || !block->parity_present || block->payload_len == 0 || block->payload_len > RX_FEC_DATAGRAM_MAX_BYTES) {
+        return;
+    }
+
+    for (int i = 0; i < FEC_V1_K_FIXED; i++) {
+        if (!block->data_present[i]) {
+            missing_count++;
+            missing_index = i;
+        }
+    }
+    if (missing_count == 0) {
+        block->completed = true;
+        return;
+    }
+
+    totals->fec_raw_missing_frames += (uint64_t)missing_count * 3u;
+    if (missing_count != 1) {
+        totals->fec_unrecovered_datagrams += (uint64_t)missing_count;
+        totals->unrecovered_by_fec_count += (uint64_t)missing_count * 3u;
+        block->completed = true;
+        return;
+    }
+
+    memcpy(recovered, block->parity, block->payload_len);
+    for (int i = 0; i < FEC_V1_K_FIXED; i++) {
+        if (i == missing_index) {
+            continue;
+        }
+        for (size_t j = 0; j < block->payload_len; j++) {
+            recovered[j] ^= block->data[i][j];
+        }
+    }
+
+    totals->fec_recovered_datagrams++;
+    process_frame_payload_bytes(
+        recovered, block->payload_len, files, cfg, received_tracker, seq_state, totals, ts, win, link_fsm,
+        "FEC_RECOVERED", true
+    );
+    block->completed = true;
+}
+
+static int process_fec_datagram(
+    const uint8_t *buf,
+    size_t len,
+    RxFecState *fec_state,
+    const RxFiles *files,
+    const RxConfig *cfg,
+    ReceivedSeqTracker *received_tracker,
+    SeqState *seq_state,
+    RxTotals *totals,
+    RxTimingState *ts,
+    WindowStats *win,
+    RxLinkFsm *link_fsm
+) {
+    FecV1Header header = {0};
+    RxFecBlock *block = NULL;
+    const uint8_t *payload = NULL;
+
+    if (!buf || len < FEC_V1_HEADER_LEN) {
+        return 0;
+    }
+    if (fec_v1_parse_header(buf, len, &header) != 0) {
+        return 0;
+    }
+    if ((size_t)header.payload_len + FEC_V1_HEADER_LEN > len || header.payload_len > RX_FEC_DATAGRAM_MAX_BYTES) {
+        write_log_line(files ? files->log_fp : NULL, "WARN", "invalid FEC payload length");
+        return -1;
+    }
+
+    payload = buf + FEC_V1_HEADER_LEN;
+    block = fec_get_block(fec_state, &header);
+    if (!block) {
+        return -1;
+    }
+    if (block->payload_len != header.payload_len || block->first_seq != header.first_seq) {
+        write_log_line(files ? files->log_fp : NULL, "WARN", "inconsistent FEC block metadata");
+        return -1;
+    }
+
+    if (header.packet_type == FEC_V1_TYPE_DATA) {
+        memcpy(block->data[header.index_in_block], payload, header.payload_len);
+        block->data_present[header.index_in_block] = true;
+        process_frame_payload_bytes(
+            payload, header.payload_len, files, cfg, received_tracker, seq_state, totals, ts, win, link_fsm,
+            "OK", false
+        );
+        return 1;
+    }
+
+    if (header.packet_type == FEC_V1_TYPE_PARITY) {
+        memcpy(block->parity, payload, header.payload_len);
+        block->parity_present = true;
+        fec_try_recover_block(block, files, cfg, received_tracker, seq_state, totals, ts, win, link_fsm);
+        return 1;
+    }
+
+    return 0;
+}
+
 static int run_crc32_test_mode(void) {
     FrameV1Header frame = {0};
     uint8_t frame_bytes[FRAME_V1_MAX_WIRE_BYTES] = {0};
@@ -1580,6 +1838,7 @@ int main(int argc, char **argv) {
     RxLinkFsm link_fsm = {
         .state = RX_LINK_STATE_NORMAL,
     };
+    RxFecState fec_state = {0};
     WindowStats *win = NULL;
 
     cfg.bind_ip = "0.0.0.0";
@@ -1611,12 +1870,14 @@ int main(int argc, char **argv) {
     if (files.log_fp) {
         snprintf(buf, sizeof(buf),
                  "frame_v1 config version=%u header_len=%u payload_max=%d frame_max=%d"
-                 " stream_buf_cap=%d",
+                 " stream_buf_cap=%d fec_mode=%s fec_header_len=%d",
                  kFrameV1Version,
                  (unsigned)FRAME_V1_WIRE_HEADER_LEN,
                  FRAME_V1_PAYLOAD_MAX_BYTES,
                  FRAME_V1_MAX_WIRE_BYTES,
-                 RX_STREAM_BUF_CAP);
+                 RX_STREAM_BUF_CAP,
+                 cfg.fec_enabled ? "xor" : "off",
+                 FEC_V1_HEADER_LEN);
         write_log_line(files.log_fp, "INFO", buf);
         snprintf(buf, sizeof(buf),
                 "rx start bind=%s:%d duration_sec=%d",
@@ -1779,6 +2040,20 @@ int main(int argc, char **argv) {
             win = select_window_stats(&ts);
             win->recv_any++;
 
+            if (cfg.fec_enabled) {
+                int fec_result = process_fec_datagram(
+                    buf_udp, (size_t)n, &fec_state, &files, &cfg, &received_tracker, &seq_state,
+                    &totals, &ts, win, &link_fsm
+                );
+                if (fec_result > 0) {
+                    goto after_datagram_processed;
+                }
+                if (fec_result < 0) {
+                    totals.bad_size++;
+                    goto after_datagram_processed;
+                }
+            }
+
             if (rx_buf_append(&stream_buf, buf_udp, (size_t)n) != 0) {
                 snprintf(msg, sizeof(msg),
                          "stream_buf overflow: recv_len=%zd buf_len=%zu cap=%d, clearing",
@@ -1809,26 +2084,13 @@ int main(int argc, char **argv) {
                     continue;
                 }
 
-                bool was_seen = false;
-                bool is_recovered = false;
-                if (mark_received_seq(&received_tracker, parsed.header.seq, &was_seen, &is_recovered) == 0) {
-                    if (was_seen) {
-                        totals.duplicate_frames_total++;
-                    } else {
-                        totals.unique_received_frames_total++;
-                        if (is_recovered) {
-                            totals.recovered_by_retransmit_count++;
-                        }
-                    }
-                }
-                update_seq_stats(parsed.header.seq, &seq_state, &totals, &ts, win);
-                update_latency_stats(parsed.header.tx_ts, &totals, &ts, win);
-                write_per_recv_csv(&files, &ts, parsed.header.seq, parsed.header.tx_ts);
-
-                totals.recv_ok++;
-                win->recv_ok++;
-                on_recv_ok_for_fsm(&files, &cfg, &ts, &link_fsm, win->recv_ok);
+                process_parsed_frame_common(
+                    &files, &cfg, &parsed, &received_tracker, &seq_state, &totals, &ts, win, &link_fsm,
+                    "OK", false
+                );
             }
+after_datagram_processed:
+            ;
         }
 
         if (now_monotonic_ns(&ts.now_for_stats_ns) != 0) {

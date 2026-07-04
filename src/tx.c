@@ -38,9 +38,12 @@
 
 #include "frame_v1_wire.h"
 #include "feedback_v1_wire.h"
+#include "fec_v1_wire.h"
 
 // 1 UDP datagram に連結して送信する frame 数
 #define TX_FRAMES_PER_DATAGRAM 3
+#define TX_MAX_DATA_DATAGRAM_BYTES (TX_FRAMES_PER_DATAGRAM * FRAME_V1_MAX_WIRE_BYTES)
+#define TX_MAX_FEC_DATAGRAM_BYTES (FEC_V1_HEADER_LEN + TX_MAX_DATA_DATAGRAM_BYTES)
 
 // 故障注入の対象フィールド
 typedef enum {
@@ -82,6 +85,10 @@ typedef struct {
     int retransmit_enabled;
     int retransmit_buffer_datagrams;
     int retransmit_max_datagrams_per_feedback;
+    int fec_enabled;
+    int fec_k;
+    int fec_r;
+    int drop_datagram_every;
 } TxConfig;
 
 typedef struct {
@@ -96,6 +103,9 @@ typedef struct {
     uint64_t retransmit_sent_datagrams;
     uint64_t retransmit_sent_frames;
     uint64_t retransmit_buffer_miss_count;
+    uint64_t fec_data_datagrams;
+    uint64_t fec_parity_datagrams;
+    uint64_t dropped_datagrams;
 } TxTotals;
 
 typedef struct {
@@ -103,7 +113,7 @@ typedef struct {
     uint32_t frame_count;
     size_t len;
     int valid;
-    uint8_t bytes[TX_FRAMES_PER_DATAGRAM * FRAME_V1_MAX_WIRE_BYTES];
+    uint8_t bytes[TX_MAX_DATA_DATAGRAM_BYTES];
 } TxStoredDatagram;
 
 typedef struct {
@@ -154,7 +164,8 @@ static void print_usage(const char *prog) {
             " [--feedback-bind-ip <ip> --feedback-bind-port <port> --adaptive-log-path <path>]"
             " [--adaptive-mode off|on] [--adaptive-min-rate-hz <hz>] [--adaptive-max-rate-hz <hz>]"
             " [--adaptive-high-latency-ms <ms>] [--adaptive-debug-set-rate-hz <hz>]"
-            " [--retransmit-mode off|on] [--retransmit-buffer-datagrams <n>] [--retransmit-max-datagrams-per-feedback <n>]\n",
+            " [--retransmit-mode off|on] [--retransmit-buffer-datagrams <n>] [--retransmit-max-datagrams-per-feedback <n>]"
+            " [--fec-mode off|xor] [--fec-k 4] [--fec-r 1] [--drop-datagram-every <n>]\n",
             prog);
 }
 
@@ -199,6 +210,8 @@ static int parse_args(int argc, char **argv, TxConfig *cfg) {
     cfg->adaptive_high_latency_ms = 0.0;
     cfg->retransmit_buffer_datagrams = 4096;
     cfg->retransmit_max_datagrams_per_feedback = 256;
+    cfg->fec_k = FEC_V1_K_FIXED;
+    cfg->fec_r = FEC_V1_R_FIXED;
 
     static struct option long_opts[] = {
         {"dst-ip", required_argument, 0, 1},
@@ -225,6 +238,10 @@ static int parse_args(int argc, char **argv, TxConfig *cfg) {
         {"retransmit-mode", required_argument, 0, 22},
         {"retransmit-buffer-datagrams", required_argument, 0, 23},
         {"retransmit-max-datagrams-per-feedback", required_argument, 0, 24},
+        {"fec-mode", required_argument, 0, 25},
+        {"fec-k", required_argument, 0, 26},
+        {"fec-r", required_argument, 0, 27},
+        {"drop-datagram-every", required_argument, 0, 28},
         {0, 0, 0, 0}
     };
 
@@ -403,6 +420,38 @@ static int parse_args(int argc, char **argv, TxConfig *cfg) {
                     return -1;
                 }
                 break;
+            case 25:
+                if (strcmp(optarg, "xor") == 0) {
+                    cfg->fec_enabled = 1;
+                } else if (strcmp(optarg, "off") == 0) {
+                    cfg->fec_enabled = 0;
+                } else {
+                    fprintf(stderr, "Invalid --fec-mode: %s (expected off|xor)\n", optarg);
+                    print_usage(argv[0]);
+                    return -1;
+                }
+                break;
+            case 26:
+                if (parse_int(optarg, &cfg->fec_k) != 0) {
+                    fprintf(stderr, "Invalid --fec-k: %s\n", optarg);
+                    print_usage(argv[0]);
+                    return -1;
+                }
+                break;
+            case 27:
+                if (parse_int(optarg, &cfg->fec_r) != 0) {
+                    fprintf(stderr, "Invalid --fec-r: %s\n", optarg);
+                    print_usage(argv[0]);
+                    return -1;
+                }
+                break;
+            case 28:
+                if (parse_int(optarg, &cfg->drop_datagram_every) != 0) {
+                    fprintf(stderr, "Invalid --drop-datagram-every: %s\n", optarg);
+                    print_usage(argv[0]);
+                    return -1;
+                }
+                break;
             default:
                 print_usage(argv[0]);
                 return -1;
@@ -471,6 +520,20 @@ static int parse_args(int argc, char **argv, TxConfig *cfg) {
     }
     if (cfg->retransmit_max_datagrams_per_feedback <= 0) {
         fprintf(stderr, "Invalid --retransmit-max-datagrams-per-feedback: %d\n", cfg->retransmit_max_datagrams_per_feedback);
+        return -1;
+    }
+
+    if (cfg->fec_enabled && (cfg->fec_k != FEC_V1_K_FIXED || cfg->fec_r != FEC_V1_R_FIXED)) {
+        fprintf(stderr, "Invalid FEC parameters: this milestone supports --fec-k 4 --fec-r 1 only\n");
+        print_usage(argv[0]);
+        return -1;
+    }
+    if (cfg->drop_datagram_every < 0) {
+        fprintf(stderr, "Invalid --drop-datagram-every: %d (expected >= 0)\n", cfg->drop_datagram_every);
+        return -1;
+    }
+    if (cfg->fec_enabled && cfg->retransmit_enabled) {
+        fprintf(stderr, "--fec-mode xor and --retransmit-mode on are not supported together in this milestone\n");
         return -1;
     }
 
@@ -674,7 +737,7 @@ static void apply_fault_injection(
 }
 
 static void write_summary(const TxFiles *files, const TxTotals *totals, uint64_t elapsed_ns) {
-    char msg[256];
+    char msg[1024];
     double avg_rate = 0.0;
 
     if (!files || !files->log_fp || !totals) {
@@ -690,7 +753,8 @@ static void write_summary(const TxFiles *files, const TxTotals *totals, uint64_t
         msg,
         sizeof(msg),
         "tx summary sent=%lu last_seq=%lu elapsed_sec=%.3f avg_rate_hz=%.2f"
-        " retransmit_requested_frames=%llu retransmit_sent_datagrams=%llu retransmit_sent_frames=%llu retransmit_buffer_miss_count=%llu",
+        " retransmit_requested_frames=%llu retransmit_sent_datagrams=%llu retransmit_sent_frames=%llu retransmit_buffer_miss_count=%llu"
+        " fec_mode=%s fec_k=%d fec_r=%d fec_data_datagrams=%llu fec_parity_datagrams=%llu dropped_datagrams=%llu",
         (unsigned long)totals->sent,
         (unsigned long)((totals->seq == 0) ? 0 : (totals->seq - 1)),
         (double)elapsed_ns / 1e9,
@@ -698,7 +762,13 @@ static void write_summary(const TxFiles *files, const TxTotals *totals, uint64_t
         (unsigned long long)totals->retransmit_requested_frames,
         (unsigned long long)totals->retransmit_sent_datagrams,
         (unsigned long long)totals->retransmit_sent_frames,
-        (unsigned long long)totals->retransmit_buffer_miss_count
+        (unsigned long long)totals->retransmit_buffer_miss_count,
+        (totals->fec_data_datagrams > 0 || totals->fec_parity_datagrams > 0) ? "xor" : "off",
+        FEC_V1_K_FIXED,
+        FEC_V1_R_FIXED,
+        (unsigned long long)totals->fec_data_datagrams,
+        (unsigned long long)totals->fec_parity_datagrams,
+        (unsigned long long)totals->dropped_datagrams
     );
 
     write_log_line(files->log_fp, "INFO", msg);
@@ -1147,7 +1217,13 @@ int main(int argc, char **argv) {
     TxRateState rate = {0};
     FrameV1Header frame = {0};
     uint8_t payload[FRAME_V1_PAYLOAD_MAX_BYTES] = {0};
-    uint8_t datagram_buf[TX_FRAMES_PER_DATAGRAM * FRAME_V1_MAX_WIRE_BYTES];
+    uint8_t datagram_buf[TX_MAX_DATA_DATAGRAM_BYTES];
+    uint8_t send_buf[TX_MAX_FEC_DATAGRAM_BYTES];
+    uint8_t parity_payload[TX_MAX_DATA_DATAGRAM_BYTES] = {0};
+    size_t fec_payload_len = 0;
+    int fec_block_count = 0;
+    uint32_t fec_block_id = 0;
+    uint32_t fec_block_first_seq = 0;
     int logged_first_frame = 0;
     int pending_first_frame_log = 0;
     char first_frame_log_msg[256] = {0};
@@ -1198,6 +1274,12 @@ int main(int argc, char **argv) {
                      "retransmit enabled buffer_datagrams=%d max_datagrams_per_feedback=%d",
                      cfg.retransmit_buffer_datagrams,
                      cfg.retransmit_max_datagrams_per_feedback);
+            write_log_line(files.log_fp, "INFO", buf);
+        }
+        if (cfg.fec_enabled) {
+            snprintf(buf, sizeof(buf),
+                     "fec enabled mode=xor k=%d r=%d header_len=%d drop_datagram_every=%d",
+                     cfg.fec_k, cfg.fec_r, FEC_V1_HEADER_LEN, cfg.drop_datagram_every);
             write_log_line(files.log_fp, "INFO", buf);
         }
         if (cfg.outage_enabled) {
@@ -1405,24 +1487,106 @@ int main(int argc, char **argv) {
         }
         if (!build_ok) break;
 
-        ssize_t sent = sendto(sock, datagram_buf, datagram_len, 0, (struct sockaddr *)&dest, sizeof(dest));
-        if (sent < 0) {
-            perror("sendto");
-            write_log_line(files.log_fp, "ERROR", "sendto failed");
-            break;
+        const uint8_t *wire_to_send = datagram_buf;
+        size_t wire_len = datagram_len;
+        int drop_this_datagram = 0;
+        uint64_t data_attempt_index = (uint64_t)(datagram_start_seq / TX_FRAMES_PER_DATAGRAM) + 1u;
+
+        if (cfg.drop_datagram_every > 0 && (data_attempt_index % (uint64_t)cfg.drop_datagram_every) == 0) {
+            drop_this_datagram = 1;
         }
 
-        if ((size_t)sent != datagram_len) {
-            write_log_line(files.log_fp, "ERROR", "sendto returned unexpected size");
-            break;
+        if (cfg.fec_enabled) {
+            FecV1Header fec_header = {0};
+            if (fec_block_count == 0) {
+                memset(parity_payload, 0, sizeof(parity_payload));
+                fec_payload_len = datagram_len;
+                fec_block_first_seq = datagram_start_seq;
+            }
+            if (datagram_len != fec_payload_len) {
+                write_log_line(files.log_fp, "ERROR", "FEC datagram length changed within block");
+                break;
+            }
+            for (size_t i = 0; i < datagram_len; i++) {
+                parity_payload[i] ^= datagram_buf[i];
+            }
+
+            fec_header.version = FEC_V1_VERSION;
+            fec_header.header_len = FEC_V1_HEADER_LEN;
+            fec_header.packet_type = FEC_V1_TYPE_DATA;
+            fec_header.k = FEC_V1_K_FIXED;
+            fec_header.r = FEC_V1_R_FIXED;
+            fec_header.index_in_block = (uint8_t)fec_block_count;
+            fec_header.payload_len = (uint16_t)datagram_len;
+            fec_header.block_id = fec_block_id;
+            fec_header.first_seq = fec_block_first_seq;
+            if (fec_v1_build_header(&fec_header, send_buf, sizeof(send_buf)) != 0) {
+                write_log_line(files.log_fp, "ERROR", "fec_v1_build_header data failed");
+                break;
+            }
+            memcpy(send_buf + FEC_V1_HEADER_LEN, datagram_buf, datagram_len);
+            wire_to_send = send_buf;
+            wire_len = FEC_V1_HEADER_LEN + datagram_len;
+            totals.fec_data_datagrams++;
         }
 
-        if (cfg.retransmit_enabled) {
-            tx_retransmit_buffer_store(&rtx_buf, datagram_start_seq, datagram_buf, datagram_len);
+        if (drop_this_datagram) {
+            totals.dropped_datagrams++;
+        } else {
+            ssize_t sent = sendto(sock, wire_to_send, wire_len, 0, (struct sockaddr *)&dest, sizeof(dest));
+            if (sent < 0) {
+                perror("sendto");
+                write_log_line(files.log_fp, "ERROR", "sendto failed");
+                break;
+            }
+
+            if ((size_t)sent != wire_len) {
+                write_log_line(files.log_fp, "ERROR", "sendto returned unexpected size");
+                break;
+            }
+
+            if (cfg.retransmit_enabled) {
+                tx_retransmit_buffer_store(&rtx_buf, datagram_start_seq, datagram_buf, datagram_len);
+            }
+            totals.sent++;
         }
 
         totals.seq += TX_FRAMES_PER_DATAGRAM;
-        totals.sent++;
+
+        if (cfg.fec_enabled) {
+            fec_block_count++;
+            if (fec_block_count == FEC_V1_K_FIXED) {
+                FecV1Header parity_header = {0};
+                parity_header.version = FEC_V1_VERSION;
+                parity_header.header_len = FEC_V1_HEADER_LEN;
+                parity_header.packet_type = FEC_V1_TYPE_PARITY;
+                parity_header.k = FEC_V1_K_FIXED;
+                parity_header.r = FEC_V1_R_FIXED;
+                parity_header.index_in_block = FEC_V1_K_FIXED;
+                parity_header.payload_len = (uint16_t)fec_payload_len;
+                parity_header.block_id = fec_block_id;
+                parity_header.first_seq = fec_block_first_seq;
+                if (fec_v1_build_header(&parity_header, send_buf, sizeof(send_buf)) != 0) {
+                    write_log_line(files.log_fp, "ERROR", "fec_v1_build_header parity failed");
+                    break;
+                }
+                memcpy(send_buf + FEC_V1_HEADER_LEN, parity_payload, fec_payload_len);
+                ssize_t sent = sendto(sock, send_buf, FEC_V1_HEADER_LEN + fec_payload_len, 0, (struct sockaddr *)&dest, sizeof(dest));
+                if (sent < 0) {
+                    perror("sendto");
+                    write_log_line(files.log_fp, "ERROR", "sendto parity failed");
+                    break;
+                }
+                if ((size_t)sent != FEC_V1_HEADER_LEN + fec_payload_len) {
+                    write_log_line(files.log_fp, "ERROR", "sendto parity returned unexpected size");
+                    break;
+                }
+                totals.fec_parity_datagrams++;
+                fec_block_id++;
+                fec_block_count = 0;
+                fec_payload_len = 0;
+            }
+        }
 
         if (pending_first_frame_log) {
             write_log_line(files.log_fp, "INFO", first_frame_log_msg);

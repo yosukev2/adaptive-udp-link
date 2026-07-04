@@ -40,6 +40,7 @@ RX := $(BIN_DIR)/rx
 TEST_FRAMER := $(BIN_DIR)/test_framer
 FRAME_V1_WIRE := $(SRC_DIR)/frame_v1_wire.c
 FEEDBACK_V1_WIRE := $(SRC_DIR)/feedback_v1_wire.c
+FEC_V1_WIRE := $(SRC_DIR)/fec_v1_wire.c
 
 # .PHONY は「同名のファイルが存在しても、これはファイルではなくコマンド名として扱う」
 # 例: clean という名前のファイルが偶然あっても、make clean が壊れない
@@ -59,7 +60,7 @@ $(BIN_DIR):
 # | $(BIN_DIR) は「順序だけ必要な依存関係（order-only prerequisite）」
 #   - bin/ が先に必要
 #   - ただし bin/ の更新時刻が変わっても tx を無駄に再ビルドしない
-$(TX): $(SRC_DIR)/tx.c $(FRAME_V1_WIRE) $(FEEDBACK_V1_WIRE) | $(BIN_DIR)
+$(TX): $(SRC_DIR)/tx.c $(FRAME_V1_WIRE) $(FEEDBACK_V1_WIRE) $(FEC_V1_WIRE) | $(BIN_DIR)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 # 自動変数の意味（上の行で使っている）
@@ -70,7 +71,7 @@ $(TX): $(SRC_DIR)/tx.c $(FRAME_V1_WIRE) $(FEEDBACK_V1_WIRE) | $(BIN_DIR)
 #   gcc ... -o bin/tx src/tx.c src/frame_v1_wire.c
 
 # rx をビルドするルール（txと同じ考え方）
-$(RX): $(SRC_DIR)/rx.c $(FRAME_V1_WIRE) $(FEEDBACK_V1_WIRE) | $(BIN_DIR)
+$(RX): $(SRC_DIR)/rx.c $(FRAME_V1_WIRE) $(FEEDBACK_V1_WIRE) $(FEC_V1_WIRE) | $(BIN_DIR)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 # Framer ユニットテストのビルドルール
