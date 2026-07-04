@@ -616,6 +616,8 @@ int main(int argc, char **argv) {
     uint8_t payload[FRAME_V1_PAYLOAD_MAX_BYTES] = {0};
     uint8_t datagram_buf[TX_FRAMES_PER_DATAGRAM * FRAME_V1_MAX_WIRE_BYTES];
     int logged_first_frame = 0;
+    int pending_first_frame_log = 0;
+    char first_frame_log_msg[256] = {0};
 
     if (parse_args(argc, argv, &cfg) != 0) {
         return 1;
@@ -774,10 +776,6 @@ int main(int argc, char **argv) {
         }
 
         uint64_t elapsed_tx_ns = (ts.tx_ts_ns > ts.t_start_ns) ? (ts.tx_ts_ns - ts.t_start_ns) : 0;
-        while (ts.tx_ts_ns > ts.next_stats_ns) {
-            write_stats_per_1sec(&files, &ts, &totals);
-            ts.next_stats_ns += 1000000000ULL;
-        }
         if (cfg.outage_enabled) {
             if (!outage.logged_start && elapsed_tx_ns >= outage.start_ns_from_t0) {
                 snprintf(buf, sizeof(buf),
@@ -790,10 +788,6 @@ int main(int argc, char **argv) {
             }
 
             if (outage.active && elapsed_tx_ns < outage.end_ns_from_t0) {
-                while (ts.tx_ts_ns >= ts.next_stats_ns) {
-                    write_stats_per_1sec(&files, &ts, &totals);
-                    ts.next_stats_ns += 1000000000ULL;
-                }
                 continue;
             }
 
@@ -825,14 +819,14 @@ int main(int argc, char **argv) {
                 break;
             }
             if (!logged_first_frame && files.log_fp) {
-                snprintf(buf, sizeof(buf),
+                snprintf(first_frame_log_msg, sizeof(first_frame_log_msg),
                          "frame_v1 first_frame version=%u payload_len=%u seq=%" PRIu32 " crc32=0x%08" PRIX32 " frame_len=%zu",
                          frame.version,
                          frame.payload_len,
                          frame.seq,
                          frame.crc32,
                          one_frame_len);
-                write_log_line(files.log_fp, "INFO", buf);
+                pending_first_frame_log = 1;
                 logged_first_frame = 1;
             }
             // 故障注入（frame_v1_build 後の wire バイト列を直接書き換える）
@@ -865,6 +859,11 @@ int main(int argc, char **argv) {
 
         totals.seq += TX_FRAMES_PER_DATAGRAM;
         totals.sent++;
+
+        if (pending_first_frame_log) {
+            write_log_line(files.log_fp, "INFO", first_frame_log_msg);
+            pending_first_frame_log = 0;
+        }
 
         while (ts.tx_ts_ns >= ts.next_stats_ns) {
             write_stats_per_1sec(&files, &ts, &totals);
