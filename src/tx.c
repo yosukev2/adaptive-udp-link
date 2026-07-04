@@ -78,6 +78,7 @@ typedef struct {
     int adaptive_min_rate_hz;
     int adaptive_max_rate_hz;
     int adaptive_debug_set_rate_hz;
+    double adaptive_high_latency_ms;
 } TxConfig;
 
 typedef struct {
@@ -111,6 +112,7 @@ typedef struct {
     uint64_t period_ns;
     uint64_t period_remainder;
     uint64_t remainder_acc;
+    int stable_windows;
 } TxRateState;
 
 typedef struct {
@@ -130,7 +132,7 @@ static void print_usage(const char *prog) {
             " [--outage-at-sec <sec> --outage-duration-ms <ms>]"
             " [--feedback-bind-ip <ip> --feedback-bind-port <port> --adaptive-log-path <path>]"
             " [--adaptive-mode off|on] [--adaptive-min-rate-hz <hz>] [--adaptive-max-rate-hz <hz>]"
-            " [--adaptive-debug-set-rate-hz <hz>]\n",
+            " [--adaptive-high-latency-ms <ms>] [--adaptive-debug-set-rate-hz <hz>]\n",
             prog);
 }
 
@@ -154,6 +156,16 @@ static int parse_float(const char *s, float *out) {
     return 0;
 }
 
+static int parse_nonnegative_double(const char *s, double *out) {
+    char *end = NULL;
+    errno = 0;
+    double v = strtod(s, &end);
+    if (errno != 0 || end == s || *end != '\0') return -1;
+    if (v < 0.0) return -1;
+    *out = v;
+    return 0;
+}
+
 static int parse_args(int argc, char **argv, TxConfig *cfg) {
     int opt;
     int option_index = 0;
@@ -162,6 +174,7 @@ static int parse_args(int argc, char **argv, TxConfig *cfg) {
     cfg->payload_len = FRAME_V0_PAYLOAD_BYTES;
     cfg->adaptive_min_rate_hz = 1;
     cfg->adaptive_max_rate_hz = 1000000;
+    cfg->adaptive_high_latency_ms = 0.0;
 
     static struct option long_opts[] = {
         {"dst-ip", required_argument, 0, 1},
@@ -184,6 +197,7 @@ static int parse_args(int argc, char **argv, TxConfig *cfg) {
         {"adaptive-min-rate-hz", required_argument, 0, 18},
         {"adaptive-max-rate-hz", required_argument, 0, 19},
         {"adaptive-debug-set-rate-hz", required_argument, 0, 20},
+        {"adaptive-high-latency-ms", required_argument, 0, 21},
         {0, 0, 0, 0}
     };
 
@@ -330,6 +344,13 @@ static int parse_args(int argc, char **argv, TxConfig *cfg) {
                     return -1;
                 }
                 break;
+            case 21:
+                if (parse_nonnegative_double(optarg, &cfg->adaptive_high_latency_ms) != 0) {
+                    fprintf(stderr, "Invalid --adaptive-high-latency-ms: %s\n", optarg);
+                    print_usage(argv[0]);
+                    return -1;
+                }
+                break;
             default:
                 print_usage(argv[0]);
                 return -1;
@@ -442,7 +463,7 @@ static int open_output_files(const TxConfig *config, TxFiles *files) {
             return -1;
         }
         fprintf(files->adaptive_log_fp,
-                "elapsed_sec,feedback_seq,missing_delta,missing_rate,p99_latency_ms,old_rate_hz,new_rate_hz,action,reason\n");
+                "elapsed_sec,feedback_seq,missing_delta,missing_rate,p99_latency_ms,old_rate_hz,new_rate_hz,action,reason,stable_windows\n");
         fflush(files->adaptive_log_fp);
     }
     return 0;
@@ -687,6 +708,69 @@ static void tx_rate_init(TxRateState *rate, const TxConfig *cfg) {
     tx_rate_recompute_period(rate);
 }
 
+
+static int tx_rate_multiply(TxRateState *rate, double factor) {
+    double raw = (double)rate->current_rate_hz * factor;
+    int requested = (factor >= 1.0) ? (int)(raw + 0.999999) : (int)raw;
+    if (requested < 1) {
+        requested = 1;
+    }
+    return tx_rate_set(rate, requested);
+}
+
+static void decide_adaptive_rate(
+    const TxConfig *cfg,
+    TxRateState *rate,
+    const FeedbackV1Packet *packet,
+    double missing_rate,
+    double p99_latency_ms,
+    int *old_rate_hz,
+    int *new_rate_hz,
+    const char **action,
+    const char **reason
+) {
+    *old_rate_hz = rate->current_rate_hz;
+    *new_rate_hz = *old_rate_hz;
+    *action = "hold";
+    *reason = "feedback_logged";
+
+    if (!cfg->adaptive_enabled) {
+        *reason = "adaptive_off";
+        return;
+    }
+
+    if (cfg->adaptive_debug_set_rate_hz > 0) {
+        *new_rate_hz = tx_rate_set(rate, cfg->adaptive_debug_set_rate_hz);
+        if (*new_rate_hz != *old_rate_hz) {
+            *action = "set_rate";
+            *reason = "debug_set_rate";
+        }
+        return;
+    }
+
+    if (packet->missing_delta >= 3 || missing_rate > 0.001) {
+        rate->stable_windows = 0;
+        *new_rate_hz = tx_rate_multiply(rate, 0.80);
+        *action = (*new_rate_hz < *old_rate_hz) ? "decrease" : "hold";
+        *reason = "missing_detected";
+        return;
+    }
+
+    if (packet->missing_delta == 0) {
+        rate->stable_windows++;
+        if (rate->stable_windows >= 3 && p99_latency_ms > cfg->adaptive_high_latency_ms) {
+            *new_rate_hz = tx_rate_multiply(rate, 1.05);
+            *action = (*new_rate_hz > *old_rate_hz) ? "increase" : "hold";
+            *reason = "stable_latency_threshold";
+            return;
+        }
+        *reason = "stable_wait";
+        return;
+    }
+
+    rate->stable_windows = 0;
+}
+
 static int open_feedback_socket(const TxConfig *cfg, const TxFiles *files) {
     struct sockaddr_in bind_addr = {0};
     int sock = -1;
@@ -761,16 +845,13 @@ static void process_feedback_packets(int feedback_sock, const TxConfig *cfg, TxF
         }
         missing_rate = (double)packet.missing_rate_ppm / 1000000.0;
         p99_latency_ms = (double)packet.p99_latency_us / 1000.0;
-        if (cfg->adaptive_enabled && cfg->adaptive_debug_set_rate_hz > 0 && rate) {
-            new_rate_hz = tx_rate_set(rate, cfg->adaptive_debug_set_rate_hz);
-            if (new_rate_hz != old_rate_hz) {
-                action = "set_rate";
-                reason = "debug_set_rate";
-            }
+        if (rate) {
+            decide_adaptive_rate(cfg, rate, &packet, missing_rate, p99_latency_ms,
+                                 &old_rate_hz, &new_rate_hz, &action, &reason);
         }
 
         fprintf(files->adaptive_log_fp,
-                "%.3f,%lu,%lu,%.6f,%.3f,%d,%d,%s,%s\n",
+                "%.3f,%lu,%lu,%.6f,%.3f,%d,%d,%s,%s,%d\n",
                 elapsed_sec,
                 (unsigned long)packet.feedback_seq,
                 (unsigned long)packet.missing_delta,
@@ -779,7 +860,8 @@ static void process_feedback_packets(int feedback_sock, const TxConfig *cfg, TxF
                 old_rate_hz,
                 new_rate_hz,
                 action,
-                reason);
+                reason,
+                rate ? rate->stable_windows : 0);
         fflush(files->adaptive_log_fp);
 
         snprintf(msg, sizeof(msg),
