@@ -37,6 +37,7 @@
 #include <inttypes.h>
 
 #include "frame_v1_wire.h"
+#include "feedback_v1_wire.h"
 
 // 1 UDP datagram に連結して送信する frame 数
 #define TX_FRAMES_PER_DATAGRAM 3
@@ -69,10 +70,15 @@ typedef struct {
     int outage_at_sec_set;
     int outage_duration_ms_set;
     int outage_enabled;
+    const char *feedback_bind_ip;
+    int feedback_bind_port;
+    int feedback_enabled;
+    const char *adaptive_log_path;
 } TxConfig;
 
 typedef struct {
     FILE *log_fp;
+    FILE *adaptive_log_fp;
 } TxFiles;
 
 typedef struct {
@@ -108,7 +114,8 @@ static void print_usage(const char *prog) {
             "Usage: %s --dst-ip <ip> --dst-port <port> --rate-hz <hz> --duration-sec <sec>"
             " --log-path <path> [--sndbuf <bytes>] [--payload-len <n>] [--version <n>] [--crc32-test]"
             " [--fault-target preamble|payload_len|crc|payload|header] [--fault-rate 0.0-1.0]"
-            " [--outage-at-sec <sec> --outage-duration-ms <ms>]\n",
+            " [--outage-at-sec <sec> --outage-duration-ms <ms>]"
+            " [--feedback-bind-ip <ip> --feedback-bind-port <port> --adaptive-log-path <path>]\n",
             prog);
 }
 
@@ -153,6 +160,9 @@ static int parse_args(int argc, char **argv, TxConfig *cfg) {
         {"outage-at-sec", required_argument, 0, 11},
         {"outage-duration-ms", required_argument, 0, 12},
         {"sndbuf",        required_argument, 0, 13},
+        {"feedback-bind-ip", required_argument, 0, 14},
+        {"feedback-bind-port", required_argument, 0, 15},
+        {"adaptive-log-path", required_argument, 0, 16},
         {0, 0, 0, 0}
     };
 
@@ -254,6 +264,19 @@ static int parse_args(int argc, char **argv, TxConfig *cfg) {
                 }
                 cfg->sndbuf_set = 1;
                 break;
+            case 14:
+                cfg->feedback_bind_ip = optarg;
+                break;
+            case 15:
+                if (parse_int(optarg, &cfg->feedback_bind_port) != 0) {
+                    fprintf(stderr, "Invalid --feedback-bind-port: %s\n", optarg);
+                    print_usage(argv[0]);
+                    return -1;
+                }
+                break;
+            case 16:
+                cfg->adaptive_log_path = optarg;
+                break;
             default:
                 print_usage(argv[0]);
                 return -1;
@@ -305,6 +328,19 @@ static int parse_args(int argc, char **argv, TxConfig *cfg) {
         cfg->outage_enabled = 1;
     }
 
+    if ((cfg->feedback_bind_ip || cfg->feedback_bind_port > 0 || cfg->adaptive_log_path) &&
+        (!cfg->feedback_bind_ip || cfg->feedback_bind_port <= 0 || !cfg->adaptive_log_path)) {
+        fprintf(stderr, "--feedback-bind-ip, --feedback-bind-port and --adaptive-log-path must be specified together\n");
+        print_usage(argv[0]);
+        return -1;
+    }
+    if (cfg->feedback_bind_port < 0 || cfg->feedback_bind_port > 65535) {
+        fprintf(stderr, "Invalid --feedback-bind-port: %d\n", cfg->feedback_bind_port);
+        print_usage(argv[0]);
+        return -1;
+    }
+    cfg->feedback_enabled = cfg->feedback_bind_ip && cfg->feedback_bind_port > 0 && cfg->adaptive_log_path;
+
     return 0;
 }
 
@@ -313,6 +349,10 @@ static void close_output_files(TxFiles *files) {
         fclose(files->log_fp);
         files->log_fp = NULL;
     }
+    if (files->adaptive_log_fp) {
+        fclose(files->adaptive_log_fp);
+        files->adaptive_log_fp = NULL;
+    }
 }
 
 static int open_output_files(const TxConfig *config, TxFiles *files) {
@@ -320,6 +360,17 @@ static int open_output_files(const TxConfig *config, TxFiles *files) {
     if (!files->log_fp) {
         perror("fopen(log_path)");
         return -1;
+    }
+    if (config->adaptive_log_path) {
+        files->adaptive_log_fp = fopen(config->adaptive_log_path, "w");
+        if (!files->adaptive_log_fp) {
+            perror("fopen(adaptive_log_path)");
+            close_output_files(files);
+            return -1;
+        }
+        fprintf(files->adaptive_log_fp,
+                "elapsed_sec,feedback_seq,missing_delta,missing_rate,p99_latency_ms,old_rate_hz,new_rate_hz,action,reason\n");
+        fflush(files->adaptive_log_fp);
     }
     return 0;
 }
@@ -528,6 +579,99 @@ static int build_dst_addr(const char *ip, int port, struct sockaddr_in *out) {
     return 0;
 }
 
+
+static int open_feedback_socket(const TxConfig *cfg, const TxFiles *files) {
+    struct sockaddr_in bind_addr = {0};
+    int sock = -1;
+    char msg[256];
+
+    if (!cfg || !cfg->feedback_enabled) {
+        return -1;
+    }
+
+    sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0) {
+        perror("feedback socket");
+        return -1;
+    }
+
+    if (build_dst_addr(cfg->feedback_bind_ip, cfg->feedback_bind_port, &bind_addr) != 0) {
+        close(sock);
+        return -1;
+    }
+
+    if (bind(sock, (struct sockaddr *)&bind_addr, sizeof(bind_addr)) != 0) {
+        perror("feedback bind");
+        close(sock);
+        return -1;
+    }
+
+    snprintf(msg, sizeof(msg),
+             "feedback receiver enabled bind=%s:%d adaptive_log=%s",
+             cfg->feedback_bind_ip,
+             cfg->feedback_bind_port,
+             cfg->adaptive_log_path);
+    write_log_line(files ? files->log_fp : NULL, "INFO", msg);
+    return sock;
+}
+
+static void process_feedback_packets(int feedback_sock, const TxConfig *cfg, TxFiles *files, uint64_t now_ns, uint64_t t_start_ns) {
+    uint8_t buf[FEEDBACK_V1_WIRE_LEN];
+    char msg[256];
+
+    if (feedback_sock < 0 || !cfg || !files || !files->adaptive_log_fp) {
+        return;
+    }
+
+    for (;;) {
+        FeedbackV1Packet packet = {0};
+        ssize_t n = recvfrom(feedback_sock, buf, sizeof(buf), MSG_DONTWAIT, NULL, NULL);
+        double elapsed_sec = 0.0;
+        double missing_rate = 0.0;
+        double p99_latency_ms = 0.0;
+
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                return;
+            }
+            snprintf(msg, sizeof(msg), "feedback recv failed errno=%d", errno);
+            write_log_line(files->log_fp, "WARN", msg);
+            return;
+        }
+
+        if ((size_t)n != FEEDBACK_V1_WIRE_LEN || feedback_v1_parse(buf, (size_t)n, &packet) != 0) {
+            snprintf(msg, sizeof(msg), "feedback invalid len=%zd", n);
+            write_log_line(files->log_fp, "WARN", msg);
+            continue;
+        }
+
+        if (now_ns >= t_start_ns) {
+            elapsed_sec = (double)(now_ns - t_start_ns) / 1e9;
+        }
+        missing_rate = (double)packet.missing_rate_ppm / 1000000.0;
+        p99_latency_ms = (double)packet.p99_latency_us / 1000.0;
+
+        fprintf(files->adaptive_log_fp,
+                "%.3f,%lu,%lu,%.6f,%.3f,%d,%d,hold,feedback_logged\n",
+                elapsed_sec,
+                (unsigned long)packet.feedback_seq,
+                (unsigned long)packet.missing_delta,
+                missing_rate,
+                p99_latency_ms,
+                cfg->rate_hz,
+                cfg->rate_hz);
+        fflush(files->adaptive_log_fp);
+
+        snprintf(msg, sizeof(msg),
+                 "feedback received seq=%lu missing_delta=%lu missing_rate_ppm=%lu p99_latency_us=%lu action=hold",
+                 (unsigned long)packet.feedback_seq,
+                 (unsigned long)packet.missing_delta,
+                 (unsigned long)packet.missing_rate_ppm,
+                 (unsigned long)packet.p99_latency_us);
+        write_log_line(files->log_fp, "INFO", msg);
+    }
+}
+
 static void timespec_add_ns(struct timespec *t, uint64_t ns) {
     t->tv_sec += ns / 1000000000ULL;
     t->tv_nsec += (long)(ns % 1000000000ULL);
@@ -618,6 +762,7 @@ int main(int argc, char **argv) {
     int logged_first_frame = 0;
     int pending_first_frame_log = 0;
     char first_frame_log_msg[256] = {0};
+    int feedback_sock = -1;
 
     if (parse_args(argc, argv, &cfg) != 0) {
         return 1;
@@ -688,6 +833,15 @@ int main(int argc, char **argv) {
         close(sock);
         close_output_files(&files);
         return 1;
+    }
+
+    if (cfg.feedback_enabled) {
+        feedback_sock = open_feedback_socket(&cfg, &files);
+        if (feedback_sock < 0) {
+            close(sock);
+            close_output_files(&files);
+            return 1;
+        }
     }
 
     if (clock_gettime(CLOCK_MONOTONIC, &ts.next_send) != 0) {
@@ -865,12 +1019,19 @@ int main(int argc, char **argv) {
             pending_first_frame_log = 0;
         }
 
+        process_feedback_packets(feedback_sock, &cfg, &files, ts.tx_ts_ns, ts.t_start_ns);
+
         while (ts.tx_ts_ns >= ts.next_stats_ns) {
             write_stats_per_1sec(&files, &ts, &totals);
             ts.next_stats_ns += 1000000000ULL;
         }
     }
 
+    process_feedback_packets(feedback_sock, &cfg, &files, ts.now_ns, ts.t_start_ns);
+
+    if (feedback_sock >= 0) {
+        close(feedback_sock);
+    }
     close(sock);
 
     uint64_t t_end_ns = 0;
