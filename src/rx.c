@@ -11,7 +11,6 @@
 #include <poll.h>
 #include <stdint.h>
 #include <stddef.h>
-#include <inttypes.h>
 #include <signal.h>
 #include <stdbool.h>
 
@@ -452,12 +451,12 @@ static void write_fsm_threshold_log(const RxFiles *files, RxRecoveryMode mode, R
     snprintf(
         msg,
         sizeof(msg),
-        "link_fsm mode=%s initial=%s degraded_detect=recv_ok_zero_for_%" PRIu64
-        "_windows recover_complete=recv_ok_positive_for_%" PRIu64 "_windows",
+        "link_fsm mode=%s initial=%s degraded_detect=recv_ok_zero_for_%llu"
+        "_windows recover_complete=recv_ok_positive_for_%llu_windows",
         rx_recovery_mode_name(mode),
         rx_link_state_name(initial_state),
-        RX_FSM_DEGRADED_EMPTY_WINDOWS,
-        RX_FSM_RECOVER_GOOD_WINDOWS
+        (unsigned long long)RX_FSM_DEGRADED_EMPTY_WINDOWS,
+        (unsigned long long)RX_FSM_RECOVER_GOOD_WINDOWS
     );
     write_log_line(files->log_fp, "INFO", msg);
 }
@@ -486,16 +485,16 @@ static void write_fsm_transition_log(
     snprintf(
         msg,
         sizeof(msg),
-        "link_state %s -> %s since_start_ms=%" PRIu64
-        " reason=%s empty_windows=%" PRIu64
-        " good_windows=%" PRIu64 " recv_ok_in_window=%" PRIu64,
+        "link_state %s -> %s since_start_ms=%llu"
+        " reason=%s empty_windows=%llu"
+        " good_windows=%llu recv_ok_in_window=%llu",
         rx_link_state_name(from_state),
         rx_link_state_name(to_state),
-        since_start_ms,
+        (unsigned long long)since_start_ms,
         reason,
-        empty_windows,
-        good_windows,
-        recv_ok_in_window
+        (unsigned long long)empty_windows,
+        (unsigned long long)good_windows,
+        (unsigned long long)recv_ok_in_window
     );
     write_log_line(files->log_fp, "INFO", msg);
 }
@@ -526,11 +525,11 @@ static void write_fsm_transition_csv(
 
     fprintf(
         files->state_fp,
-        "%s,%d,%" PRIu64 ",%" PRIu64 ",%s,%s,%s\n",
+        "%s,%d,%llu,%llu,%s,%s,%s\n",
         link_name_token,
         config->trial,
-        event_ns,
-        elapsed_ms,
+        (unsigned long long)event_ns,
+        (unsigned long long)elapsed_ms,
         rx_link_state_name(from_state),
         rx_link_state_name(to_state),
         reason
@@ -604,36 +603,36 @@ static void write_summary(const RxFiles *files, const RxTotals *totals, uint64_t
     snprintf(
         msg,
         sizeof(msg),
-        "rx summary recv_any=%" PRIu64 " recv_ok=%" PRIu64
-        " bad_size=%" PRIu64 " bad_header=%" PRIu64 " bad_crc=%" PRIu64
-        " resync_count=%" PRIu64 " preamble_miss=%" PRIu64
-        " crc_fail=%" PRIu64 " len_invalid=%" PRIu64
-        " poll_timeout=%" PRIu64
-        " elapsed_ms=%" PRIu64 " avg_latency_ms=%.3f"
-        " max_latency_ms=%" PRIu64 " min_latency_ms=%" PRIu64
-        " gap_cnt=%" PRIu64 " dup_cnt=%" PRIu64 " reord_cnt=%" PRIu64
-        " future_ts_cnt=%" PRIu64 " future_ts_detected=%" PRIu64,
-        totals->recv_any,
-        totals->recv_ok,
-        totals->bad_size,
-        totals->bad_header,
-        totals->bad_crc,
-        totals->resync_count,
-        totals->preamble_miss,
-        totals->bad_crc,      // crc_fail = bad_crc の別名
-        totals->len_invalid,
-        totals->poll_timeout,
-        elapsed_ns / UINT64_C(1000000),
+        "rx summary recv_any=%llu recv_ok=%llu"
+        " bad_size=%llu bad_header=%llu bad_crc=%llu"
+        " resync_count=%llu preamble_miss=%llu"
+        " crc_fail=%llu len_invalid=%llu"
+        " poll_timeout=%llu"
+        " elapsed_ms=%llu avg_latency_ms=%.3f"
+        " max_latency_ms=%llu min_latency_ms=%llu"
+        " gap_cnt=%llu dup_cnt=%llu reord_cnt=%llu"
+        " future_ts_cnt=%llu future_ts_detected=%llu",
+        (unsigned long long)totals->recv_any,
+        (unsigned long long)totals->recv_ok,
+        (unsigned long long)totals->bad_size,
+        (unsigned long long)totals->bad_header,
+        (unsigned long long)totals->bad_crc,
+        (unsigned long long)totals->resync_count,
+        (unsigned long long)totals->preamble_miss,
+        (unsigned long long)totals->bad_crc,      // crc_fail = bad_crc の別名
+        (unsigned long long)totals->len_invalid,
+        (unsigned long long)totals->poll_timeout,
+        (unsigned long long)(elapsed_ns / UINT64_C(1000000)),
         (totals->latency_sample_cnt > 0)
             ? (double)totals->latency_sum_ns / (double)totals->latency_sample_cnt / 1000000.0
             : 0.0,
-        totals->max_latency_ns / UINT64_C(1000000),
-        totals->min_latency_ns / UINT64_C(1000000),
-        totals->gap_cnt,
-        totals->dup_cnt,
-        totals->reord_cnt,
-        totals->future_ts_cnt,
-        totals->future_ts_detected
+        (unsigned long long)(totals->max_latency_ns / UINT64_C(1000000)),
+        (unsigned long long)(totals->min_latency_ns / UINT64_C(1000000)),
+        (unsigned long long)totals->gap_cnt,
+        (unsigned long long)totals->dup_cnt,
+        (unsigned long long)totals->reord_cnt,
+        (unsigned long long)totals->future_ts_cnt,
+        (unsigned long long)totals->future_ts_detected
     );
 
     write_log_line(files->log_fp, "INFO", msg);
@@ -784,19 +783,19 @@ static void write_trial_summary(const RxFiles *files, const RxConfig *config, Rx
         msg,
         sizeof(msg),
         "trial_summary link_name=%s trial=%d duration_sec=%d sent=na"
-        " recv_ok=%" PRIu64 " gap_est=%" PRIu64 " crc_fail=%" PRIu64
-        " len_invalid=%" PRIu64 " preamble_miss=%" PRIu64
-        " resync_count=%" PRIu64
+        " recv_ok=%llu gap_est=%llu crc_fail=%llu"
+        " len_invalid=%llu preamble_miss=%llu"
+        " resync_count=%llu"
         " latency_p50_ms=%s latency_p95_ms=%s latency_p99_ms=%s latency_max_ms=%s",
         link_name_token,
         config->trial,
         config->duration_sec,
-        totals->recv_ok,
-        totals->gap_cnt,
-        totals->bad_crc,
-        totals->len_invalid,
-        totals->preamble_miss,
-        totals->resync_count,
+        (unsigned long long)totals->recv_ok,
+        (unsigned long long)totals->gap_cnt,
+        (unsigned long long)totals->bad_crc,
+        (unsigned long long)totals->len_invalid,
+        (unsigned long long)totals->preamble_miss,
+        (unsigned long long)totals->resync_count,
         latency_p50_ms,
         latency_p95_ms,
         latency_p99_ms,
@@ -930,8 +929,9 @@ static void write_per_recv_csv(const RxFiles *files, const RxTimingState *ts, ui
     char msg_csv_by_1recv[256];
     if (files->csv_by_1recv_fp) {
         snprintf(msg_csv_by_1recv, sizeof(msg_csv_by_1recv),
-            "%" PRIu64 ",%" PRIu32 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",OK\n",
-            ts->recv_now_ns, seq_value, tx_ts_ns, ts->latency, ts->gap
+            "%llu,%lu,%llu,%llu,%llu,OK\n",
+            (unsigned long long)ts->recv_now_ns, (unsigned long)seq_value, (unsigned long long)tx_ts_ns,
+            (unsigned long long)ts->latency, (unsigned long long)ts->gap
             );
         fprintf(files->csv_by_1recv_fp, "%s", msg_csv_by_1recv);
         fflush(files->csv_by_1recv_fp);
@@ -941,8 +941,8 @@ static void write_per_recv_csv(const RxFiles *files, const RxTimingState *ts, ui
 static void write_fault_csv(const RxFiles *files, uint64_t recv_now_ns, const char *parse_status) {
     if (files->csv_by_1recv_fp) {
         fprintf(files->csv_by_1recv_fp,
-                "%" PRIu64 ",0,0,0,0,%s\n",
-                recv_now_ns, parse_status);
+                "%llu,0,0,0,0,%s\n",
+                (unsigned long long)recv_now_ns, parse_status);
         fflush(files->csv_by_1recv_fp);
     }
 }
@@ -1055,11 +1055,11 @@ static FramerResult rx_framer_step(
 
     if (frame_v1_validate_header(out) != 0) {
         snprintf(msg, msg_size,
-                 "framer: invalid header preamble=0x%08" PRIX32 " version=%u header_len=%u"
+                 "framer: invalid header preamble=0x%08lX version=%u header_len=%u"
                  " payload_len=%zu frame_len=%zu",
-                 out->header.preamble,
-                 out->header.version,
-                 out->header.header_len,
+                 (unsigned long)out->header.preamble,
+                 (unsigned int)out->header.version,
+                 (unsigned int)out->header.header_len,
                  out->payload_len,
                  out->frame_len);
         write_log_line(log_fp, "WARN", msg);
@@ -1072,10 +1072,10 @@ static FramerResult rx_framer_step(
 
     if (frame_v1_validate_crc(&out->header, out->payload, out->payload_len) != 1) {
         snprintf(msg, msg_size,
-                 "framer: crc mismatch seq=%" PRIu32 " payload_len=%zu crc32=0x%08" PRIX32,
-                 out->header.seq,
+                 "framer: crc mismatch seq=%lu payload_len=%zu crc32=0x%08lX",
+                 (unsigned long)out->header.seq,
                  out->payload_len,
-                 out->header.crc32);
+                 (unsigned long)out->header.crc32);
         write_log_line(log_fp, "WARN", msg);
         totals->resync_count++;
         totals->bad_crc++;
@@ -1113,22 +1113,24 @@ static void write_log_per_1sec(const RxFiles *files, RxTimingState *ts, WindowSt
 
     if (files->csv_in_1sec_fp) {
         snprintf(msg, sizeof(msg),
-            "%" PRIu64 ",%.3f,%.3f,%.3f,%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%.2f,%.2f\n",
-            ts->elapsed_sec, (double)ts->avg_latency_ns_in_1sec/1000000.0, (double)win->max_latency_ns/1000000.0,
-            (double)win->min_latency_ns/1000000.0, win->recv_any, win->recv_ok, win->gap_cnt, win->dup_cnt, win->reord_cnt,
+            "%llu,%.3f,%.3f,%.3f,%llu,%llu,%llu,%llu,%llu,%.2f,%.2f\n",
+            (unsigned long long)ts->elapsed_sec, (double)ts->avg_latency_ns_in_1sec/1000000.0, (double)win->max_latency_ns/1000000.0,
+            (double)win->min_latency_ns/1000000.0, (unsigned long long)win->recv_any, (unsigned long long)win->recv_ok,
+            (unsigned long long)win->gap_cnt, (unsigned long long)win->dup_cnt, (unsigned long long)win->reord_cnt,
             ts->pps_in_1sec, ts->cpu_pct_in_1sec);
         fprintf(files->csv_in_1sec_fp, "%s", msg);
         fflush(files->csv_in_1sec_fp);
     } else {
         snprintf(msg, sizeof(msg),
-            "rx_stats elapsed_sec=%" PRIu64
+            "rx_stats elapsed_sec=%llu"
             " avg_latency=%.3f"
             " max_latency=%.3f"
             " min_latency=%.3f"
-            " recv_cnt=%" PRIu64 " ok_recv_cnt=%" PRIu64 " gap_cnt=%" PRIu64 " dup_cnt=%" PRIu64 " reord_cnt=%" PRIu64
+            " recv_cnt=%llu ok_recv_cnt=%llu gap_cnt=%llu dup_cnt=%llu reord_cnt=%llu"
             " pps=%.2f cpu_pct=%.2f",
-            ts->elapsed_sec, (double)ts->avg_latency_ns_in_1sec/1000000.0, (double)win->max_latency_ns/1000000.0,
-            (double)win->min_latency_ns/1000000.0, win->recv_any, win->recv_ok, win->gap_cnt, win->dup_cnt, win->reord_cnt,
+            (unsigned long long)ts->elapsed_sec, (double)ts->avg_latency_ns_in_1sec/1000000.0, (double)win->max_latency_ns/1000000.0,
+            (double)win->min_latency_ns/1000000.0, (unsigned long long)win->recv_any, (unsigned long long)win->recv_ok,
+            (unsigned long long)win->gap_cnt, (unsigned long long)win->dup_cnt, (unsigned long long)win->reord_cnt,
             ts->pps_in_1sec, ts->cpu_pct_in_1sec);
         write_log_line(files->log_fp, "INFO", msg);
     }
@@ -1256,9 +1258,9 @@ static int run_crc32_test_mode(void) {
     }
 
     printf("crc32 test mode\n");
-    printf("payload_len=%zu seq=0x%08" PRIX32 " tx_ts=0x%016" PRIX64 "\n",
-           (size_t)frame.payload_len, frame.seq, frame.tx_ts);
-    printf("crc32=0x%08" PRIX32 " frame_len=%zu\n", frame.crc32, frame_len);
+    printf("payload_len=%zu seq=0x%08lX tx_ts=0x%016llX\n",
+           (size_t)frame.payload_len, (unsigned long)frame.seq, (unsigned long long)frame.tx_ts);
+    printf("crc32=0x%08lX frame_len=%zu\n", (unsigned long)frame.crc32, frame_len);
     return 0;
 }
 

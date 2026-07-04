@@ -15,7 +15,6 @@
 #include <string.h>
 #include <stdint.h>
 #include <stddef.h>
-#include <inttypes.h>
 
 #include "frame.h"
 #include "frame_v1_wire.h"
@@ -180,8 +179,9 @@ static int test_normal_normal_normal(void) {
     run_framer(&buf, &st);
 
     if (st.ok_count != 3 || st.bad_crc != 0 || st.resynced != 0) {
-        printf("[FAIL] %s: ok=%" PRIu64 " bad_crc=%" PRIu64 " resynced=%" PRIu64 "\n",
-               name, st.ok_count, st.bad_crc, st.resynced);
+        printf("[FAIL] %s: ok=%llu bad_crc=%llu resynced=%llu\n",
+               name, (unsigned long long)st.ok_count, (unsigned long long)st.bad_crc,
+               (unsigned long long)st.resynced);
         return 1;
     }
     printf("[PASS] %s\n", name);
@@ -229,8 +229,9 @@ static int test_normal_badcrc_normal(void) {
     run_framer(&buf, &st);
 
     if (st.ok_count != 2 || st.bad_crc != 1) {
-        printf("[FAIL] %s: ok=%" PRIu64 " bad_crc=%" PRIu64 " resynced=%" PRIu64 "\n",
-               name, st.ok_count, st.bad_crc, st.resynced);
+        printf("[FAIL] %s: ok=%llu bad_crc=%llu resynced=%llu\n",
+               name, (unsigned long long)st.ok_count, (unsigned long long)st.bad_crc,
+               (unsigned long long)st.resynced);
         return 1;
     }
     printf("[PASS] %s\n", name);
@@ -263,8 +264,9 @@ static int test_garbage_normal_normal(void) {
     run_framer(&buf, &st);
 
     if (st.ok_count != 2 || st.resynced < 1) {
-        printf("[FAIL] %s: ok=%" PRIu64 " resynced=%" PRIu64 " bad_crc=%" PRIu64 "\n",
-               name, st.ok_count, st.resynced, st.bad_crc);
+        printf("[FAIL] %s: ok=%llu resynced=%llu bad_crc=%llu\n",
+               name, (unsigned long long)st.ok_count, (unsigned long long)st.resynced,
+               (unsigned long long)st.bad_crc);
         return 1;
     }
     printf("[PASS] %s\n", name);

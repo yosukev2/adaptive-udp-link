@@ -1,7 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include <errno.h>
-#include <inttypes.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <time.h>
@@ -78,12 +77,12 @@ int main(void) {
         jitter_us = (int64_t)delta_us - (int64_t)kTargetPeriodUs;
 
         printf(
-            "linux_rpi5,raspberry_pi_5,%d,%d,%" PRIu64 ",%" PRIu64 ",%" PRId64 "\n",
+            "linux_rpi5,raspberry_pi_5,%d,%d,%llu,%llu,%lld\n",
             sample_index,
             kTargetPeriodUs,
-            timestamp_us,
-            delta_us,
-            jitter_us
+            (unsigned long long)timestamp_us,
+            (unsigned long long)delta_us,
+            (long long)jitter_us
         );
 
         previous_timestamp_us = timestamp_us;
