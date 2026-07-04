@@ -74,6 +74,10 @@ typedef struct {
     int feedback_bind_port;
     int feedback_enabled;
     const char *adaptive_log_path;
+    int adaptive_enabled;
+    int adaptive_min_rate_hz;
+    int adaptive_max_rate_hz;
+    int adaptive_debug_set_rate_hz;
 } TxConfig;
 
 typedef struct {
@@ -101,6 +105,15 @@ typedef struct {
 } TxTimingState;
 
 typedef struct {
+    int current_rate_hz;
+    int min_rate_hz;
+    int max_rate_hz;
+    uint64_t period_ns;
+    uint64_t period_remainder;
+    uint64_t remainder_acc;
+} TxRateState;
+
+typedef struct {
     uint64_t start_ns_from_t0;
     uint64_t end_ns_from_t0;
     uint64_t duration_ns;
@@ -115,7 +128,9 @@ static void print_usage(const char *prog) {
             " --log-path <path> [--sndbuf <bytes>] [--payload-len <n>] [--version <n>] [--crc32-test]"
             " [--fault-target preamble|payload_len|crc|payload|header] [--fault-rate 0.0-1.0]"
             " [--outage-at-sec <sec> --outage-duration-ms <ms>]"
-            " [--feedback-bind-ip <ip> --feedback-bind-port <port> --adaptive-log-path <path>]\n",
+            " [--feedback-bind-ip <ip> --feedback-bind-port <port> --adaptive-log-path <path>]"
+            " [--adaptive-mode off|on] [--adaptive-min-rate-hz <hz>] [--adaptive-max-rate-hz <hz>]"
+            " [--adaptive-debug-set-rate-hz <hz>]\n",
             prog);
 }
 
@@ -145,6 +160,8 @@ static int parse_args(int argc, char **argv, TxConfig *cfg) {
 
     cfg->version = (int)kFrameV1Version;
     cfg->payload_len = FRAME_V0_PAYLOAD_BYTES;
+    cfg->adaptive_min_rate_hz = 1;
+    cfg->adaptive_max_rate_hz = 1000000;
 
     static struct option long_opts[] = {
         {"dst-ip", required_argument, 0, 1},
@@ -163,6 +180,10 @@ static int parse_args(int argc, char **argv, TxConfig *cfg) {
         {"feedback-bind-ip", required_argument, 0, 14},
         {"feedback-bind-port", required_argument, 0, 15},
         {"adaptive-log-path", required_argument, 0, 16},
+        {"adaptive-mode", required_argument, 0, 17},
+        {"adaptive-min-rate-hz", required_argument, 0, 18},
+        {"adaptive-max-rate-hz", required_argument, 0, 19},
+        {"adaptive-debug-set-rate-hz", required_argument, 0, 20},
         {0, 0, 0, 0}
     };
 
@@ -277,6 +298,38 @@ static int parse_args(int argc, char **argv, TxConfig *cfg) {
             case 16:
                 cfg->adaptive_log_path = optarg;
                 break;
+            case 17:
+                if (strcmp(optarg, "off") == 0) {
+                    cfg->adaptive_enabled = 0;
+                } else if (strcmp(optarg, "on") == 0) {
+                    cfg->adaptive_enabled = 1;
+                } else {
+                    fprintf(stderr, "Invalid --adaptive-mode: %s (expected off|on)\n", optarg);
+                    print_usage(argv[0]);
+                    return -1;
+                }
+                break;
+            case 18:
+                if (parse_int(optarg, &cfg->adaptive_min_rate_hz) != 0) {
+                    fprintf(stderr, "Invalid --adaptive-min-rate-hz: %s\n", optarg);
+                    print_usage(argv[0]);
+                    return -1;
+                }
+                break;
+            case 19:
+                if (parse_int(optarg, &cfg->adaptive_max_rate_hz) != 0) {
+                    fprintf(stderr, "Invalid --adaptive-max-rate-hz: %s\n", optarg);
+                    print_usage(argv[0]);
+                    return -1;
+                }
+                break;
+            case 20:
+                if (parse_int(optarg, &cfg->adaptive_debug_set_rate_hz) != 0) {
+                    fprintf(stderr, "Invalid --adaptive-debug-set-rate-hz: %s\n", optarg);
+                    print_usage(argv[0]);
+                    return -1;
+                }
+                break;
             default:
                 print_usage(argv[0]);
                 return -1;
@@ -340,6 +393,26 @@ static int parse_args(int argc, char **argv, TxConfig *cfg) {
         return -1;
     }
     cfg->feedback_enabled = cfg->feedback_bind_ip && cfg->feedback_bind_port > 0 && cfg->adaptive_log_path;
+
+    if (cfg->adaptive_min_rate_hz <= 0 || cfg->adaptive_max_rate_hz <= 0 ||
+        cfg->adaptive_min_rate_hz > cfg->adaptive_max_rate_hz) {
+        fprintf(stderr, "Invalid adaptive rate range: min=%d max=%d\n", cfg->adaptive_min_rate_hz, cfg->adaptive_max_rate_hz);
+        print_usage(argv[0]);
+        return -1;
+    }
+    if (cfg->rate_hz < cfg->adaptive_min_rate_hz || cfg->rate_hz > cfg->adaptive_max_rate_hz) {
+        fprintf(stderr, "Initial --rate-hz must be within adaptive range: rate=%d min=%d max=%d\n",
+                cfg->rate_hz, cfg->adaptive_min_rate_hz, cfg->adaptive_max_rate_hz);
+        print_usage(argv[0]);
+        return -1;
+    }
+    if (cfg->adaptive_debug_set_rate_hz != 0 &&
+        (cfg->adaptive_debug_set_rate_hz < cfg->adaptive_min_rate_hz ||
+         cfg->adaptive_debug_set_rate_hz > cfg->adaptive_max_rate_hz)) {
+        fprintf(stderr, "Invalid --adaptive-debug-set-rate-hz: %d outside min/max\n", cfg->adaptive_debug_set_rate_hz);
+        print_usage(argv[0]);
+        return -1;
+    }
 
     return 0;
 }
@@ -580,6 +653,40 @@ static int build_dst_addr(const char *ip, int port, struct sockaddr_in *out) {
 }
 
 
+
+static void tx_rate_recompute_period(TxRateState *rate) {
+    rate->period_ns = (1000000000ULL * (uint64_t)TX_FRAMES_PER_DATAGRAM) / (uint64_t)rate->current_rate_hz;
+    rate->period_remainder = (1000000000ULL * (uint64_t)TX_FRAMES_PER_DATAGRAM) % (uint64_t)rate->current_rate_hz;
+    rate->remainder_acc = 0;
+}
+
+static int tx_rate_clamp(const TxRateState *rate, int requested_rate_hz) {
+    if (requested_rate_hz < rate->min_rate_hz) {
+        return rate->min_rate_hz;
+    }
+    if (requested_rate_hz > rate->max_rate_hz) {
+        return rate->max_rate_hz;
+    }
+    return requested_rate_hz;
+}
+
+static int tx_rate_set(TxRateState *rate, int requested_rate_hz) {
+    int next_rate_hz = tx_rate_clamp(rate, requested_rate_hz);
+    if (next_rate_hz == rate->current_rate_hz) {
+        return rate->current_rate_hz;
+    }
+    rate->current_rate_hz = next_rate_hz;
+    tx_rate_recompute_period(rate);
+    return rate->current_rate_hz;
+}
+
+static void tx_rate_init(TxRateState *rate, const TxConfig *cfg) {
+    rate->current_rate_hz = cfg->rate_hz;
+    rate->min_rate_hz = cfg->adaptive_min_rate_hz;
+    rate->max_rate_hz = cfg->adaptive_max_rate_hz;
+    tx_rate_recompute_period(rate);
+}
+
 static int open_feedback_socket(const TxConfig *cfg, const TxFiles *files) {
     struct sockaddr_in bind_addr = {0};
     int sock = -1;
@@ -615,7 +722,7 @@ static int open_feedback_socket(const TxConfig *cfg, const TxFiles *files) {
     return sock;
 }
 
-static void process_feedback_packets(int feedback_sock, const TxConfig *cfg, TxFiles *files, uint64_t now_ns, uint64_t t_start_ns) {
+static void process_feedback_packets(int feedback_sock, const TxConfig *cfg, TxFiles *files, TxRateState *rate, uint64_t now_ns, uint64_t t_start_ns) {
     uint8_t buf[FEEDBACK_V1_WIRE_LEN];
     char msg[256];
 
@@ -629,6 +736,10 @@ static void process_feedback_packets(int feedback_sock, const TxConfig *cfg, TxF
         double elapsed_sec = 0.0;
         double missing_rate = 0.0;
         double p99_latency_ms = 0.0;
+        int old_rate_hz = rate ? rate->current_rate_hz : cfg->rate_hz;
+        int new_rate_hz = old_rate_hz;
+        const char *action = "hold";
+        const char *reason = "feedback_logged";
 
         if (n < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -650,24 +761,36 @@ static void process_feedback_packets(int feedback_sock, const TxConfig *cfg, TxF
         }
         missing_rate = (double)packet.missing_rate_ppm / 1000000.0;
         p99_latency_ms = (double)packet.p99_latency_us / 1000.0;
+        if (cfg->adaptive_enabled && cfg->adaptive_debug_set_rate_hz > 0 && rate) {
+            new_rate_hz = tx_rate_set(rate, cfg->adaptive_debug_set_rate_hz);
+            if (new_rate_hz != old_rate_hz) {
+                action = "set_rate";
+                reason = "debug_set_rate";
+            }
+        }
 
         fprintf(files->adaptive_log_fp,
-                "%.3f,%lu,%lu,%.6f,%.3f,%d,%d,hold,feedback_logged\n",
+                "%.3f,%lu,%lu,%.6f,%.3f,%d,%d,%s,%s\n",
                 elapsed_sec,
                 (unsigned long)packet.feedback_seq,
                 (unsigned long)packet.missing_delta,
                 missing_rate,
                 p99_latency_ms,
-                cfg->rate_hz,
-                cfg->rate_hz);
+                old_rate_hz,
+                new_rate_hz,
+                action,
+                reason);
         fflush(files->adaptive_log_fp);
 
         snprintf(msg, sizeof(msg),
-                 "feedback received seq=%lu missing_delta=%lu missing_rate_ppm=%lu p99_latency_us=%lu action=hold",
+                 "feedback received seq=%lu missing_delta=%lu missing_rate_ppm=%lu p99_latency_us=%lu action=%s old_rate_hz=%d new_rate_hz=%d",
                  (unsigned long)packet.feedback_seq,
                  (unsigned long)packet.missing_delta,
                  (unsigned long)packet.missing_rate_ppm,
-                 (unsigned long)packet.p99_latency_us);
+                 (unsigned long)packet.p99_latency_us,
+                 action,
+                 old_rate_hz,
+                 new_rate_hz);
         write_log_line(files->log_fp, "INFO", msg);
     }
 }
@@ -756,6 +879,7 @@ int main(int argc, char **argv) {
     TxTotals totals = {0};
     TxTimingState ts = {0};
     TxOutageState outage = {0};
+    TxRateState rate = {0};
     FrameV1Header frame = {0};
     uint8_t payload[FRAME_V1_PAYLOAD_MAX_BYTES] = {0};
     uint8_t datagram_buf[TX_FRAMES_PER_DATAGRAM * FRAME_V1_MAX_WIRE_BYTES];
@@ -781,6 +905,7 @@ int main(int argc, char **argv) {
 
     char buf[256];
     fill_payload_pattern(payload, (size_t)cfg.payload_len);
+    tx_rate_init(&rate, &cfg);
 
     if (files.log_fp) {
         snprintf(buf, sizeof(buf),
@@ -857,9 +982,7 @@ int main(int argc, char **argv) {
     // 例) rate_hz=100, TX_FRAMES_PER_DATAGRAM=3:
     //   period_ns = 3000000000/100 = 30000000 ns (30 ms)
     //   → 33.3 datagram/s × 3 frame = 100 frame/s ✓
-    ts.period_ns = (1000000000ULL * (uint64_t)TX_FRAMES_PER_DATAGRAM) / (uint64_t)cfg.rate_hz;
-    uint64_t period_remainder = (1000000000ULL * (uint64_t)TX_FRAMES_PER_DATAGRAM) % (uint64_t)cfg.rate_hz;
-    uint64_t remainder_acc = 0;
+    ts.period_ns = rate.period_ns;
 
     if (now_monotonic_ns(&ts.t_start_ns) != 0) {
         perror("clock_gettime");
@@ -904,11 +1027,11 @@ int main(int argc, char **argv) {
 
     while (ts.now_ns - ts.t_start_ns < (uint64_t)cfg.duration_sec * 1000000000ULL) {
         // remainder 補正: 端数を蓄積し rate_hz 回で +1ns して長期平均を合わせる
-        uint64_t this_period = ts.period_ns;
-        remainder_acc += period_remainder;
-        if (remainder_acc >= (uint64_t)cfg.rate_hz) {
+        uint64_t this_period = rate.period_ns;
+        rate.remainder_acc += rate.period_remainder;
+        if (rate.remainder_acc >= (uint64_t)rate.current_rate_hz) {
             this_period++;
-            remainder_acc -= (uint64_t)cfg.rate_hz;
+            rate.remainder_acc -= (uint64_t)rate.current_rate_hz;
         }
         timespec_add_ns(&ts.next_send, this_period);
         int sleep_err = clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts.next_send, NULL);
@@ -1019,7 +1142,7 @@ int main(int argc, char **argv) {
             pending_first_frame_log = 0;
         }
 
-        process_feedback_packets(feedback_sock, &cfg, &files, ts.tx_ts_ns, ts.t_start_ns);
+        process_feedback_packets(feedback_sock, &cfg, &files, &rate, ts.tx_ts_ns, ts.t_start_ns);
 
         while (ts.tx_ts_ns >= ts.next_stats_ns) {
             write_stats_per_1sec(&files, &ts, &totals);
@@ -1027,7 +1150,7 @@ int main(int argc, char **argv) {
         }
     }
 
-    process_feedback_packets(feedback_sock, &cfg, &files, ts.now_ns, ts.t_start_ns);
+    process_feedback_packets(feedback_sock, &cfg, &files, &rate, ts.now_ns, ts.t_start_ns);
 
     if (feedback_sock >= 0) {
         close(feedback_sock);
