@@ -64,6 +64,10 @@ typedef struct {
     int crc32_test_mode;        // ハードコードした v1 フレームで CRC32 を確認する
     FaultTarget fault_target;   // 故障注入の対象フィールド（FAULT_NONE = 無効）
     float fault_rate;           // 故障注入確率（0.0〜1.0）
+    float drop_rate;            // datagram random drop probability (0.0..1.0)
+    int drop_seed;              // random drop seed
+    int drop_seed_set;
+    int drop_enabled;
     int outage_at_sec;          // 単発瞬断の開始時刻（tx 開始からの相対秒）
     int outage_duration_ms;     // 単発瞬断の継続時間（ms）
     int outage_at_sec_set;
@@ -78,6 +82,8 @@ typedef struct {
 typedef struct {
     uint32_t seq;
     uint32_t sent;
+    uint32_t dropped_datagrams;
+    uint32_t dropped_frames;
 } TxTotals;
 
 typedef struct {
@@ -108,7 +114,8 @@ static void print_usage(const char *prog) {
             "Usage: %s --dst-ip <ip> --dst-port <port> --rate-hz <hz> --duration-sec <sec>"
             " --log-path <path> [--sndbuf <bytes>] [--payload-len <n>] [--version <n>] [--crc32-test]"
             " [--fault-target preamble|payload_len|crc|payload|header] [--fault-rate 0.0-1.0]"
-            " [--outage-at-sec <sec> --outage-duration-ms <ms>]\n",
+            " [--outage-at-sec <sec> --outage-duration-ms <ms>]"
+            " [--drop-rate 0.0-1.0 --drop-seed <uint> --drop-target datagram]\n",
             prog);
 }
 
@@ -153,6 +160,9 @@ static int parse_args(int argc, char **argv, TxConfig *cfg) {
         {"outage-at-sec", required_argument, 0, 11},
         {"outage-duration-ms", required_argument, 0, 12},
         {"sndbuf",        required_argument, 0, 13},
+        {"drop-rate",     required_argument, 0, 14},
+        {"drop-seed",     required_argument, 0, 15},
+        {"drop-target",   required_argument, 0, 16},
         {0, 0, 0, 0}
     };
 
@@ -254,6 +264,29 @@ static int parse_args(int argc, char **argv, TxConfig *cfg) {
                 }
                 cfg->sndbuf_set = 1;
                 break;
+            case 14:
+                if (parse_float(optarg, &cfg->drop_rate) != 0) {
+                    fprintf(stderr, "Invalid --drop-rate: %s (expected 0.0-1.0)\n", optarg);
+                    print_usage(argv[0]);
+                    return -1;
+                }
+                cfg->drop_enabled = 1;
+                break;
+            case 15:
+                if (parse_int(optarg, &cfg->drop_seed) != 0) {
+                    fprintf(stderr, "Invalid --drop-seed: %s\n", optarg);
+                    print_usage(argv[0]);
+                    return -1;
+                }
+                cfg->drop_seed_set = 1;
+                break;
+            case 16:
+                if (strcmp(optarg, "datagram") != 0) {
+                    fprintf(stderr, "Invalid --drop-target: %s (expected datagram)\n", optarg);
+                    print_usage(argv[0]);
+                    return -1;
+                }
+                break;
             default:
                 print_usage(argv[0]);
                 return -1;
@@ -276,6 +309,16 @@ static int parse_args(int argc, char **argv, TxConfig *cfg) {
     }
     if (cfg->sndbuf_set && cfg->sndbuf <= 0) {
         fprintf(stderr, "Invalid --sndbuf: %d (expected > 0)\n", cfg->sndbuf);
+        print_usage(argv[0]);
+        return -1;
+    }
+    if (cfg->drop_rate < 0.0f || cfg->drop_rate > 1.0f) {
+        fprintf(stderr, "Invalid --drop-rate: %.6f (expected 0.0..1.0)\n", (double)cfg->drop_rate);
+        print_usage(argv[0]);
+        return -1;
+    }
+    if (cfg->drop_seed_set && cfg->drop_seed < 0) {
+        fprintf(stderr, "Invalid --drop-seed: %d (expected >= 0)\n", cfg->drop_seed);
         print_usage(argv[0]);
         return -1;
     }
@@ -483,8 +526,10 @@ static void write_summary(const TxFiles *files, const TxTotals *totals, uint64_t
     snprintf(
         msg,
         sizeof(msg),
-        "tx summary sent=%" PRIu32 " last_seq=%" PRIu32 " elapsed_sec=%.3f avg_rate_hz=%.2f",
+        "tx summary sent=%" PRIu32 " dropped_datagrams=%" PRIu32 " dropped_frames=%" PRIu32 " last_seq=%" PRIu32 " elapsed_sec=%.3f avg_rate_hz=%.2f",
         totals->sent,
+        totals->dropped_datagrams,
+        totals->dropped_frames,
         (totals->seq == 0) ? 0 : (totals->seq - 1),
         (double)elapsed_ns / 1e9,
         avg_rate
@@ -626,7 +671,7 @@ int main(int argc, char **argv) {
     }
 
     // 故障注入の乱数シードを初期化
-    srand((unsigned int)time(NULL));
+    srand(cfg.drop_seed_set ? (unsigned int)cfg.drop_seed : (unsigned int)time(NULL));
 
     if (open_output_files(&cfg, &files) != 0) {
         return 1;
@@ -659,6 +704,12 @@ int main(int argc, char **argv) {
             snprintf(buf, sizeof(buf),
                      "outage configured at_sec=%d duration_ms=%d",
                      cfg.outage_at_sec, cfg.outage_duration_ms);
+            write_log_line(files.log_fp, "INFO", buf);
+        }
+        if (cfg.drop_enabled || cfg.drop_seed_set) {
+            snprintf(buf, sizeof(buf),
+                     "random_drop configured target=datagram drop_rate=%.6f drop_seed=%d drop_seed_set=%d",
+                     (double)cfg.drop_rate, cfg.drop_seed, cfg.drop_seed_set);
             write_log_line(files.log_fp, "INFO", buf);
         }
     }
@@ -850,6 +901,18 @@ int main(int argc, char **argv) {
             datagram_len += one_frame_len;
         }
         if (!build_ok) break;
+
+        if (cfg.drop_enabled && cfg.drop_rate > 0.0f && ((double)rand() / ((double)RAND_MAX + 1.0)) < (double)cfg.drop_rate) {
+            totals.seq += TX_FRAMES_PER_DATAGRAM;
+            totals.dropped_datagrams++;
+            totals.dropped_frames += TX_FRAMES_PER_DATAGRAM;
+
+            while (ts.tx_ts_ns >= ts.next_stats_ns) {
+                write_stats_per_1sec(&files, &ts, &totals);
+                ts.next_stats_ns += 1000000000ULL;
+            }
+            continue;
+        }
 
         ssize_t sent = sendto(sock, datagram_buf, datagram_len, 0, (struct sockaddr *)&dest, sizeof(dest));
         if (sent < 0) {
