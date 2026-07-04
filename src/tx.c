@@ -404,8 +404,8 @@ static void apply_fault_injection(
             int bit_off  = rand() % 8;
             frame_buf[byte_off] ^= (uint8_t)(1U << bit_off);
             snprintf(msg, sizeof(msg),
-                     "seq=%" PRIu32 ": fault injected to preamble (byte=%d bit=%d)",
-                     seq, byte_off, bit_off);
+                     "seq=%lu: fault injected to preamble (byte=%d bit=%d)",
+                     (unsigned long)seq, byte_off, bit_off);
             break;
         }
         case FAULT_PAYLOAD_LEN: {
@@ -414,8 +414,8 @@ static void apply_fault_injection(
             frame_buf[FRAME_V1_PAYLOAD_LEN_OFFSET]     = (uint8_t)(bad_len >> 8);
             frame_buf[FRAME_V1_PAYLOAD_LEN_OFFSET + 1] = (uint8_t)bad_len;
             snprintf(msg, sizeof(msg),
-                     "seq=%" PRIu32 ": fault injected to payload_len (bad_len=%u)",
-                     seq, bad_len);
+                     "seq=%lu: fault injected to payload_len (bad_len=%u)",
+                     (unsigned long)seq, (unsigned int)bad_len);
             break;
         }
         case FAULT_CRC: {
@@ -424,15 +424,15 @@ static void apply_fault_injection(
             int bit_off  = rand() % 8;
             frame_buf[byte_off] ^= (uint8_t)(1U << bit_off);
             snprintf(msg, sizeof(msg),
-                     "seq=%" PRIu32 ": fault injected to crc (byte=%d bit=%d)",
-                     seq, byte_off, bit_off);
+                     "seq=%lu: fault injected to crc (byte=%d bit=%d)",
+                     (unsigned long)seq, byte_off, bit_off);
             break;
         }
         case FAULT_PAYLOAD: {
             // payload_len=0 のときは注入不可
             if (payload_len == 0) {
                 snprintf(msg, sizeof(msg),
-                         "seq=%" PRIu32 ": fault skip payload (payload_len=0)", seq);
+                         "seq=%lu: fault skip payload (payload_len=0)", (unsigned long)seq);
                 write_log_line(log_fp, "WARN", msg);
                 return;
             }
@@ -440,8 +440,8 @@ static void apply_fault_injection(
             int bit_off  = rand() % 8;
             frame_buf[FRAME_V1_WIRE_HEADER_LEN + (size_t)byte_off] ^= (uint8_t)(1U << bit_off);
             snprintf(msg, sizeof(msg),
-                     "seq=%" PRIu32 ": fault injected to payload (byte=%d bit=%d)",
-                     seq, byte_off, bit_off);
+                     "seq=%lu: fault injected to payload (byte=%d bit=%d)",
+                     (unsigned long)seq, byte_off, bit_off);
             break;
         }
         case FAULT_HEADER: {
@@ -449,13 +449,13 @@ static void apply_fault_injection(
             if (rand() % 2 == 0) {
                 frame_buf[FRAME_V1_VERSION_OFFSET] = kFrameV1Version + 1U;
                 snprintf(msg, sizeof(msg),
-                         "seq=%" PRIu32 ": fault injected to header (version=%u)",
-                         seq, kFrameV1Version + 1U);
+                         "seq=%lu: fault injected to header (version=%u)",
+                         (unsigned long)seq, (unsigned int)(kFrameV1Version + 1U));
             } else {
                 frame_buf[FRAME_V1_HEADER_LEN_OFFSET] = (uint8_t)(FRAME_V1_WIRE_HEADER_LEN + 1);
                 snprintf(msg, sizeof(msg),
-                         "seq=%" PRIu32 ": fault injected to header (header_len=%d)",
-                         seq, FRAME_V1_WIRE_HEADER_LEN + 1);
+                         "seq=%lu: fault injected to header (header_len=%d)",
+                         (unsigned long)seq, FRAME_V1_WIRE_HEADER_LEN + 1);
             }
             break;
         }
@@ -483,9 +483,9 @@ static void write_summary(const TxFiles *files, const TxTotals *totals, uint64_t
     snprintf(
         msg,
         sizeof(msg),
-        "tx summary sent=%" PRIu32 " last_seq=%" PRIu32 " elapsed_sec=%.3f avg_rate_hz=%.2f",
-        totals->sent,
-        (totals->seq == 0) ? 0 : (totals->seq - 1),
+        "tx summary sent=%lu last_seq=%lu elapsed_sec=%.3f avg_rate_hz=%.2f",
+        (unsigned long)totals->sent,
+        (unsigned long)((totals->seq == 0) ? 0 : (totals->seq - 1)),
         (double)elapsed_ns / 1e9,
         avg_rate
     );
@@ -568,11 +568,11 @@ static void write_stats_per_1sec(const TxFiles *files, TxTimingState *ts, const 
     snprintf(
         msg,
         sizeof(msg),
-        "tx_stats elapsed_sec=%" PRIu64 " sent_datagrams=%" PRIu32
-        " sent_frames=%" PRIu32 " pps=%.2f cpu_pct=%.2f",
-        elapsed_sec,
-        datagrams_delta,
-        frames_delta,
+        "tx_stats elapsed_sec=%llu sent_datagrams=%lu"
+        " sent_frames=%lu pps=%.2f cpu_pct=%.2f",
+        (unsigned long long)elapsed_sec,
+        (unsigned long)datagrams_delta,
+        (unsigned long)frames_delta,
         pps,
         cpu_pct
     );
@@ -600,9 +600,9 @@ static int run_crc32_test_mode(void) {
     }
 
     printf("crc32 test mode\n");
-    printf("payload_len=%zu seq=0x%08" PRIX32 " tx_ts=0x%016" PRIX64 "\n",
-           (size_t)frame.payload_len, frame.seq, frame.tx_ts);
-    printf("crc32=0x%08" PRIX32 " frame_len=%zu\n", frame.crc32, frame_len);
+    printf("payload_len=%zu seq=0x%08lX tx_ts=0x%016llX\n",
+           (size_t)frame.payload_len, (unsigned long)frame.seq, (unsigned long long)frame.tx_ts);
+    printf("crc32=0x%08lX frame_len=%zu\n", (unsigned long)frame.crc32, frame_len);
     return 0;
 }
 
@@ -820,11 +820,11 @@ int main(int argc, char **argv) {
             }
             if (!logged_first_frame && files.log_fp) {
                 snprintf(first_frame_log_msg, sizeof(first_frame_log_msg),
-                         "frame_v1 first_frame version=%u payload_len=%u seq=%" PRIu32 " crc32=0x%08" PRIX32 " frame_len=%zu",
-                         frame.version,
-                         frame.payload_len,
-                         frame.seq,
-                         frame.crc32,
+                         "frame_v1 first_frame version=%u payload_len=%u seq=%lu crc32=0x%08lX frame_len=%zu",
+                         (unsigned int)frame.version,
+                         (unsigned int)frame.payload_len,
+                         (unsigned long)frame.seq,
+                         (unsigned long)frame.crc32,
                          one_frame_len);
                 pending_first_frame_log = 1;
                 logged_first_frame = 1;
