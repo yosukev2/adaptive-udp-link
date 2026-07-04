@@ -89,6 +89,10 @@ typedef struct {
     int fec_k;
     int fec_r;
     int drop_datagram_every;
+    int adaptive_fec_enabled;
+    double adaptive_fec_high_missing_rate;
+    double adaptive_fec_low_missing_rate;
+    int adaptive_fec_stable_windows;
 } TxConfig;
 
 typedef struct {
@@ -147,6 +151,11 @@ typedef struct {
 } TxRateState;
 
 typedef struct {
+    int enabled;
+    int stable_windows;
+} TxFecState;
+
+typedef struct {
     uint64_t start_ns_from_t0;
     uint64_t end_ns_from_t0;
     uint64_t duration_ns;
@@ -165,7 +174,9 @@ static void print_usage(const char *prog) {
             " [--adaptive-mode off|on] [--adaptive-min-rate-hz <hz>] [--adaptive-max-rate-hz <hz>]"
             " [--adaptive-high-latency-ms <ms>] [--adaptive-debug-set-rate-hz <hz>]"
             " [--retransmit-mode off|on] [--retransmit-buffer-datagrams <n>] [--retransmit-max-datagrams-per-feedback <n>]"
-            " [--fec-mode off|xor] [--fec-k 4] [--fec-r 1] [--drop-datagram-every <n>]\n",
+            " [--fec-mode off|xor] [--fec-k 4] [--fec-r 1] [--drop-datagram-every <n>]"
+            " [--adaptive-fec off|on] [--adaptive-fec-high-missing-rate <rate>]"
+            " [--adaptive-fec-low-missing-rate <rate>] [--adaptive-fec-stable-windows <n>]\n",
             prog);
 }
 
@@ -212,6 +223,9 @@ static int parse_args(int argc, char **argv, TxConfig *cfg) {
     cfg->retransmit_max_datagrams_per_feedback = 256;
     cfg->fec_k = FEC_V1_K_FIXED;
     cfg->fec_r = FEC_V1_R_FIXED;
+    cfg->adaptive_fec_high_missing_rate = 0.001;
+    cfg->adaptive_fec_low_missing_rate = 0.0;
+    cfg->adaptive_fec_stable_windows = 3;
 
     static struct option long_opts[] = {
         {"dst-ip", required_argument, 0, 1},
@@ -242,6 +256,10 @@ static int parse_args(int argc, char **argv, TxConfig *cfg) {
         {"fec-k", required_argument, 0, 26},
         {"fec-r", required_argument, 0, 27},
         {"drop-datagram-every", required_argument, 0, 28},
+        {"adaptive-fec", required_argument, 0, 29},
+        {"adaptive-fec-high-missing-rate", required_argument, 0, 30},
+        {"adaptive-fec-low-missing-rate", required_argument, 0, 31},
+        {"adaptive-fec-stable-windows", required_argument, 0, 32},
         {0, 0, 0, 0}
     };
 
@@ -452,6 +470,38 @@ static int parse_args(int argc, char **argv, TxConfig *cfg) {
                     return -1;
                 }
                 break;
+            case 29:
+                if (strcmp(optarg, "on") == 0) {
+                    cfg->adaptive_fec_enabled = 1;
+                } else if (strcmp(optarg, "off") == 0) {
+                    cfg->adaptive_fec_enabled = 0;
+                } else {
+                    fprintf(stderr, "Invalid --adaptive-fec: %s (expected off|on)\n", optarg);
+                    print_usage(argv[0]);
+                    return -1;
+                }
+                break;
+            case 30:
+                if (parse_nonnegative_double(optarg, &cfg->adaptive_fec_high_missing_rate) != 0) {
+                    fprintf(stderr, "Invalid --adaptive-fec-high-missing-rate: %s\n", optarg);
+                    print_usage(argv[0]);
+                    return -1;
+                }
+                break;
+            case 31:
+                if (parse_nonnegative_double(optarg, &cfg->adaptive_fec_low_missing_rate) != 0) {
+                    fprintf(stderr, "Invalid --adaptive-fec-low-missing-rate: %s\n", optarg);
+                    print_usage(argv[0]);
+                    return -1;
+                }
+                break;
+            case 32:
+                if (parse_int(optarg, &cfg->adaptive_fec_stable_windows) != 0) {
+                    fprintf(stderr, "Invalid --adaptive-fec-stable-windows: %s\n", optarg);
+                    print_usage(argv[0]);
+                    return -1;
+                }
+                break;
             default:
                 print_usage(argv[0]);
                 return -1;
@@ -536,6 +586,23 @@ static int parse_args(int argc, char **argv, TxConfig *cfg) {
         fprintf(stderr, "--fec-mode xor and --retransmit-mode on are not supported together in this milestone\n");
         return -1;
     }
+    if (cfg->adaptive_fec_enabled && cfg->retransmit_enabled) {
+        fprintf(stderr, "--adaptive-fec on and --retransmit-mode on are not supported together in this milestone\n");
+        return -1;
+    }
+    if (cfg->adaptive_fec_high_missing_rate < cfg->adaptive_fec_low_missing_rate) {
+        fprintf(stderr, "Invalid adaptive FEC thresholds: high must be >= low\n");
+        return -1;
+    }
+    if (cfg->adaptive_fec_stable_windows <= 0) {
+        fprintf(stderr, "Invalid --adaptive-fec-stable-windows: %d (expected > 0)\n", cfg->adaptive_fec_stable_windows);
+        return -1;
+    }
+
+    if (cfg->adaptive_fec_enabled && (!cfg->feedback_bind_ip || cfg->feedback_bind_port <= 0 || !cfg->adaptive_log_path)) {
+        fprintf(stderr, "--adaptive-fec on requires --feedback-bind-ip, --feedback-bind-port and --adaptive-log-path\n");
+        return -1;
+    }
 
     cfg->feedback_enabled = cfg->feedback_bind_ip && cfg->feedback_bind_port > 0 && cfg->adaptive_log_path;
 
@@ -587,7 +654,7 @@ static int open_output_files(const TxConfig *config, TxFiles *files) {
             return -1;
         }
         fprintf(files->adaptive_log_fp,
-                "elapsed_sec,feedback_seq,missing_delta,missing_rate,p99_latency_ms,old_rate_hz,new_rate_hz,action,reason,stable_windows,retransmit_start_seq,retransmit_count,retransmit_sent_datagrams,retransmit_buffer_miss\n");
+                "elapsed_sec,feedback_seq,missing_delta,missing_rate,effective_missing_rate,p99_latency_ms,old_rate_hz,new_rate_hz,rate_action,rate_reason,rate_stable_windows,old_fec_mode,new_fec_mode,fec_action,fec_reason,fec_stable_windows,retransmit_start_seq,retransmit_count,retransmit_sent_datagrams,retransmit_buffer_miss\n");
         fflush(files->adaptive_log_fp);
     }
     return 0;
@@ -854,6 +921,67 @@ static int tx_rate_multiply(TxRateState *rate, double factor) {
     return tx_rate_set(rate, requested);
 }
 
+static void tx_fec_state_init(TxFecState *fec, const TxConfig *cfg) {
+    if (!fec || !cfg) {
+        return;
+    }
+    fec->enabled = cfg->fec_enabled ? 1 : 0;
+    fec->stable_windows = 0;
+}
+
+static const char *tx_fec_mode_name(int enabled) {
+    return enabled ? "xor" : "off";
+}
+
+static void decide_adaptive_fec(
+    const TxConfig *cfg,
+    TxFecState *fec,
+    double missing_rate,
+    const char **old_fec_mode,
+    const char **new_fec_mode,
+    const char **action,
+    const char **reason
+) {
+    *old_fec_mode = tx_fec_mode_name(fec ? fec->enabled : cfg->fec_enabled);
+    *new_fec_mode = *old_fec_mode;
+    *action = "hold";
+    *reason = "adaptive_fec_off";
+
+    if (!cfg || !fec || !cfg->adaptive_fec_enabled) {
+        return;
+    }
+
+    if (!fec->enabled && missing_rate > cfg->adaptive_fec_high_missing_rate) {
+        fec->enabled = 1;
+        fec->stable_windows = 0;
+        *new_fec_mode = tx_fec_mode_name(fec->enabled);
+        *action = "enable_fec";
+        *reason = "missing_rate_high";
+        return;
+    }
+
+    if (fec->enabled && missing_rate <= cfg->adaptive_fec_low_missing_rate) {
+        fec->stable_windows++;
+        *new_fec_mode = tx_fec_mode_name(fec->enabled);
+        if (fec->stable_windows >= cfg->adaptive_fec_stable_windows) {
+            fec->enabled = 0;
+            fec->stable_windows = 0;
+            *new_fec_mode = tx_fec_mode_name(fec->enabled);
+            *action = "disable_fec";
+            *reason = "stable_low_missing";
+            return;
+        }
+        *reason = "low_missing_wait";
+        return;
+    }
+
+    if (missing_rate > cfg->adaptive_fec_low_missing_rate) {
+        fec->stable_windows = 0;
+    }
+    *new_fec_mode = tx_fec_mode_name(fec->enabled);
+    *reason = fec->enabled ? "fec_on_missing_observed" : "stable_wait";
+}
+
 static void decide_adaptive_rate(
     const TxConfig *cfg,
     TxRateState *rate,
@@ -1048,9 +1176,9 @@ static uint32_t tx_retransmit_range(
     return sent_datagrams;
 }
 
-static void process_feedback_packets(int feedback_sock, int data_sock, const struct sockaddr_in *dest, const TxConfig *cfg, TxFiles *files, TxRateState *rate, TxRetransmitBuffer *rtx_buf, TxTotals *totals, uint64_t now_ns, uint64_t t_start_ns) {
+static void process_feedback_packets(int feedback_sock, int data_sock, const struct sockaddr_in *dest, const TxConfig *cfg, TxFiles *files, TxRateState *rate, TxFecState *fec, TxRetransmitBuffer *rtx_buf, TxTotals *totals, uint64_t now_ns, uint64_t t_start_ns) {
     uint8_t buf[FEEDBACK_V1_WIRE_LEN];
-    char msg[256];
+    char msg[512];
 
     if (feedback_sock < 0 || !cfg || !files || !files->adaptive_log_fp) {
         return;
@@ -1061,11 +1189,16 @@ static void process_feedback_packets(int feedback_sock, int data_sock, const str
         ssize_t n = recvfrom(feedback_sock, buf, sizeof(buf), MSG_DONTWAIT, NULL, NULL);
         double elapsed_sec = 0.0;
         double missing_rate = 0.0;
+        double effective_missing_rate = 0.0;
         double p99_latency_ms = 0.0;
         int old_rate_hz = rate ? rate->current_rate_hz : cfg->rate_hz;
         int new_rate_hz = old_rate_hz;
-        const char *action = "hold";
-        const char *reason = "feedback_logged";
+        const char *rate_action = "hold";
+        const char *rate_reason = "feedback_logged";
+        const char *old_fec_mode = tx_fec_mode_name(fec ? fec->enabled : cfg->fec_enabled);
+        const char *new_fec_mode = old_fec_mode;
+        const char *fec_action = "hold";
+        const char *fec_reason = "adaptive_fec_off";
         uint32_t retransmit_sent_datagrams = 0;
         uint32_t retransmit_buffer_miss = 0;
 
@@ -1088,11 +1221,15 @@ static void process_feedback_packets(int feedback_sock, int data_sock, const str
             elapsed_sec = (double)(now_ns - t_start_ns) / 1e9;
         }
         missing_rate = (double)packet.missing_rate_ppm / 1000000.0;
+        effective_missing_rate = missing_rate;
         p99_latency_ms = (double)packet.p99_latency_us / 1000.0;
+
         if (rate) {
             decide_adaptive_rate(cfg, rate, &packet, missing_rate, p99_latency_ms,
-                                 &old_rate_hz, &new_rate_hz, &action, &reason);
+                                 &old_rate_hz, &new_rate_hz, &rate_action, &rate_reason);
         }
+        decide_adaptive_fec(cfg, fec, missing_rate, &old_fec_mode, &new_fec_mode, &fec_action, &fec_reason);
+
         if (cfg->retransmit_enabled && (packet.flags & FEEDBACK_V1_FLAG_RETRANSMIT_REQUEST) && packet.retransmit_count > 0) {
             retransmit_sent_datagrams = tx_retransmit_range(
                 data_sock, dest, cfg, files, rtx_buf, totals,
@@ -1100,17 +1237,23 @@ static void process_feedback_packets(int feedback_sock, int data_sock, const str
         }
 
         fprintf(files->adaptive_log_fp,
-                "%.3f,%lu,%lu,%.6f,%.3f,%d,%d,%s,%s,%d,%lu,%lu,%lu,%lu\n",
+                "%.3f,%lu,%lu,%.6f,%.6f,%.3f,%d,%d,%s,%s,%d,%s,%s,%s,%s,%d,%lu,%lu,%lu,%lu\n",
                 elapsed_sec,
                 (unsigned long)packet.feedback_seq,
                 (unsigned long)packet.missing_delta,
                 missing_rate,
+                effective_missing_rate,
                 p99_latency_ms,
                 old_rate_hz,
                 new_rate_hz,
-                action,
-                reason,
+                rate_action,
+                rate_reason,
                 rate ? rate->stable_windows : 0,
+                old_fec_mode,
+                new_fec_mode,
+                fec_action,
+                fec_reason,
+                fec ? fec->stable_windows : 0,
                 (unsigned long)packet.retransmit_start_seq,
                 (unsigned long)packet.retransmit_count,
                 (unsigned long)retransmit_sent_datagrams,
@@ -1118,14 +1261,17 @@ static void process_feedback_packets(int feedback_sock, int data_sock, const str
         fflush(files->adaptive_log_fp);
 
         snprintf(msg, sizeof(msg),
-                 "feedback received seq=%lu missing_delta=%lu missing_rate_ppm=%lu p99_latency_us=%lu action=%s old_rate_hz=%d new_rate_hz=%d",
+                 "feedback received seq=%lu missing_delta=%lu missing_rate_ppm=%lu p99_latency_us=%lu rate_action=%s old_rate_hz=%d new_rate_hz=%d fec_action=%s old_fec_mode=%s new_fec_mode=%s",
                  (unsigned long)packet.feedback_seq,
                  (unsigned long)packet.missing_delta,
                  (unsigned long)packet.missing_rate_ppm,
                  (unsigned long)packet.p99_latency_us,
-                 action,
+                 rate_action,
                  old_rate_hz,
-                 new_rate_hz);
+                 new_rate_hz,
+                 fec_action,
+                 old_fec_mode,
+                 new_fec_mode);
         write_log_line(files->log_fp, "INFO", msg);
     }
 }
@@ -1215,6 +1361,7 @@ int main(int argc, char **argv) {
     TxTimingState ts = {0};
     TxOutageState outage = {0};
     TxRateState rate = {0};
+    TxFecState fec = {0};
     FrameV1Header frame = {0};
     uint8_t payload[FRAME_V1_PAYLOAD_MAX_BYTES] = {0};
     uint8_t datagram_buf[TX_MAX_DATA_DATAGRAM_BYTES];
@@ -1248,6 +1395,7 @@ int main(int argc, char **argv) {
     char buf[256];
     fill_payload_pattern(payload, (size_t)cfg.payload_len);
     tx_rate_init(&rate, &cfg);
+    tx_fec_state_init(&fec, &cfg);
 
     if (files.log_fp) {
         snprintf(buf, sizeof(buf),
@@ -1276,10 +1424,13 @@ int main(int argc, char **argv) {
                      cfg.retransmit_max_datagrams_per_feedback);
             write_log_line(files.log_fp, "INFO", buf);
         }
-        if (cfg.fec_enabled) {
+        if (cfg.fec_enabled || cfg.adaptive_fec_enabled) {
             snprintf(buf, sizeof(buf),
-                     "fec enabled mode=xor k=%d r=%d header_len=%d drop_datagram_every=%d",
-                     cfg.fec_k, cfg.fec_r, FEC_V1_HEADER_LEN, cfg.drop_datagram_every);
+                     "fec configured initial_mode=%s adaptive_fec=%s k=%d r=%d header_len=%d drop_datagram_every=%d high_missing_rate=%.6f low_missing_rate=%.6f stable_windows=%d",
+                     tx_fec_mode_name(fec.enabled),
+                     cfg.adaptive_fec_enabled ? "on" : "off",
+                     cfg.fec_k, cfg.fec_r, FEC_V1_HEADER_LEN, cfg.drop_datagram_every,
+                     cfg.adaptive_fec_high_missing_rate, cfg.adaptive_fec_low_missing_rate, cfg.adaptive_fec_stable_windows);
             write_log_line(files.log_fp, "INFO", buf);
         }
         if (cfg.outage_enabled) {
@@ -1443,6 +1594,11 @@ int main(int argc, char **argv) {
             }
         }
 
+        if (!fec.enabled) {
+            fec_block_count = 0;
+            fec_payload_len = 0;
+        }
+
         // TX_FRAMES_PER_DATAGRAM 個のフレームを datagram_buf に連結してから 1 回の sendto で送る
         uint32_t datagram_start_seq = totals.seq;
         size_t datagram_len = 0;
@@ -1496,7 +1652,7 @@ int main(int argc, char **argv) {
             drop_this_datagram = 1;
         }
 
-        if (cfg.fec_enabled) {
+        if (fec.enabled) {
             FecV1Header fec_header = {0};
             if (fec_block_count == 0) {
                 memset(parity_payload, 0, sizeof(parity_payload));
@@ -1553,7 +1709,7 @@ int main(int argc, char **argv) {
 
         totals.seq += TX_FRAMES_PER_DATAGRAM;
 
-        if (cfg.fec_enabled) {
+        if (fec.enabled) {
             fec_block_count++;
             if (fec_block_count == FEC_V1_K_FIXED) {
                 FecV1Header parity_header = {0};
@@ -1593,7 +1749,7 @@ int main(int argc, char **argv) {
             pending_first_frame_log = 0;
         }
 
-        process_feedback_packets(feedback_sock, sock, &dest, &cfg, &files, &rate, &rtx_buf, &totals, ts.tx_ts_ns, ts.t_start_ns);
+        process_feedback_packets(feedback_sock, sock, &dest, &cfg, &files, &rate, &fec, &rtx_buf, &totals, ts.tx_ts_ns, ts.t_start_ns);
 
         while (ts.tx_ts_ns >= ts.next_stats_ns) {
             write_stats_per_1sec(&files, &ts, &totals);
@@ -1601,7 +1757,7 @@ int main(int argc, char **argv) {
         }
     }
 
-    process_feedback_packets(feedback_sock, sock, &dest, &cfg, &files, &rate, &rtx_buf, &totals, ts.now_ns, ts.t_start_ns);
+    process_feedback_packets(feedback_sock, sock, &dest, &cfg, &files, &rate, &fec, &rtx_buf, &totals, ts.now_ns, ts.t_start_ns);
 
     if (feedback_sock >= 0) {
         close(feedback_sock);
