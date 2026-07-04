@@ -61,6 +61,7 @@ typedef struct {
     const char *feedback_dst_ip;  // RX 1秒window統計を送るfeedback UDPの宛先IP
     int feedback_dst_port;        // RX 1秒window統計を送るfeedback UDPの宛先port
     bool feedback_enabled;        // --feedback-dst-ip と --feedback-dst-port が揃ったときだけ送信する
+    bool retransmit_request_enabled;  // feedbackにmissing rangeを載せて再送要求する
     int recovery_mode;  // W05 の復旧モード（0=fsm, 1=timeout-only）
     int crc32_test_mode;  // ハードコードした v1 フレームで CRC32 を確認する
 } RxConfig;
@@ -85,10 +86,15 @@ typedef struct {
     uint64_t gap_cnt;
     uint64_t dup_cnt;
     uint64_t reord_cnt;
+    uint32_t retransmit_start_seq;
+    uint32_t retransmit_count;
     uint64_t latency_sum_ns;
     uint64_t latency_sample_cnt;
     uint64_t future_ts_cnt;
     uint64_t future_ts_detected;
+    uint64_t unique_received_frames_total;
+    uint64_t duplicate_frames_total;
+    uint64_t recovered_by_retransmit_count;
     uint64_t min_latency_ns;
     uint64_t max_latency_ns;
     uint64_t *latency_samples_ns;
@@ -104,11 +110,21 @@ typedef struct {
 } SeqState;
 
 typedef struct {
+    uint8_t *bits;
+    size_t bytes_cap;
+    bool has_highest_seq;
+    uint32_t highest_seq;
+    bool oom;
+} ReceivedSeqTracker;
+
+typedef struct {
     uint64_t recv_any;
     uint64_t recv_ok;
     uint64_t gap_cnt;
     uint64_t dup_cnt;
     uint64_t reord_cnt;
+    uint32_t retransmit_start_seq;
+    uint32_t retransmit_count;
     uint64_t latency_sum_ns;
     uint64_t latency_sample_cnt;
     uint64_t max_latency_ns;
@@ -176,7 +192,7 @@ typedef enum {
 
 static void print_usage(const char *prog) {
     fprintf(stderr,
-            "Usage: %s --bind-ip <ip> --port <port> --duration-sec <sec> --log-path <path> [--rcvbuf <bytes>] [--link-name <name>] [--trial <n>] [--csv-in-1sec-log-path <path>] [--csv-by-1recv-log-path <path>] [--state-log-path <path>] [--feedback-dst-ip <ip> --feedback-dst-port <port>] [--recovery-mode fsm|timeout-only] [--crc32-test]\n",
+            "Usage: %s --bind-ip <ip> --port <port> --duration-sec <sec> --log-path <path> [--rcvbuf <bytes>] [--link-name <name>] [--trial <n>] [--csv-in-1sec-log-path <path>] [--csv-by-1recv-log-path <path>] [--state-log-path <path>] [--feedback-dst-ip <ip> --feedback-dst-port <port>] [--retransmit-request off|on] [--recovery-mode fsm|timeout-only] [--crc32-test]\n",
             prog);
 }
 
@@ -224,6 +240,7 @@ static int parse_args(int argc, char **argv, RxConfig *cfg) {
         {"rcvbuf", required_argument, 0, 12},
         {"feedback-dst-ip", required_argument, 0, 13},
         {"feedback-dst-port", required_argument, 0, 14},
+        {"retransmit-request", required_argument, 0, 15},
         {0, 0, 0, 0}
     };
 
@@ -301,6 +318,17 @@ static int parse_args(int argc, char **argv, RxConfig *cfg) {
             case 14:
                 if (parse_int(optarg, &cfg->feedback_dst_port) != 0) {
                     fprintf(stderr, "Invalid --feedback-dst-port: %s\n", optarg);
+                    print_usage(argv[0]);
+                    return -1;
+                }
+                break;
+            case 15:
+                if (strcmp(optarg, "on") == 0) {
+                    cfg->retransmit_request_enabled = true;
+                } else if (strcmp(optarg, "off") == 0) {
+                    cfg->retransmit_request_enabled = false;
+                } else {
+                    fprintf(stderr, "Invalid --retransmit-request: %s\n", optarg);
                     print_usage(argv[0]);
                     return -1;
                 }
@@ -645,7 +673,8 @@ static void write_summary(const RxFiles *files, const RxTotals *totals, uint64_t
         " elapsed_ms=%llu avg_latency_ms=%.3f"
         " max_latency_ms=%llu min_latency_ms=%llu"
         " gap_cnt=%llu dup_cnt=%llu reord_cnt=%llu"
-        " future_ts_cnt=%llu future_ts_detected=%llu",
+        " future_ts_cnt=%llu future_ts_detected=%llu"
+        " retransmit_metrics unique_received_frames_total=%llu duplicate_frames_total=%llu recovered_by_retransmit_count=%llu effective_missing_total=%llu effective_missing_rate=%.6f",
         (unsigned long long)totals->recv_any,
         (unsigned long long)totals->recv_ok,
         (unsigned long long)totals->bad_size,
@@ -666,7 +695,14 @@ static void write_summary(const RxFiles *files, const RxTotals *totals, uint64_t
         (unsigned long long)totals->dup_cnt,
         (unsigned long long)totals->reord_cnt,
         (unsigned long long)totals->future_ts_cnt,
-        (unsigned long long)totals->future_ts_detected
+        (unsigned long long)totals->future_ts_detected,
+        (unsigned long long)totals->unique_received_frames_total,
+        (unsigned long long)totals->duplicate_frames_total,
+        (unsigned long long)totals->recovered_by_retransmit_count,
+        (unsigned long long)(totals->gap_cnt > totals->recovered_by_retransmit_count ? totals->gap_cnt - totals->recovered_by_retransmit_count : 0),
+        (totals->unique_received_frames_total + (totals->gap_cnt > totals->recovered_by_retransmit_count ? totals->gap_cnt - totals->recovered_by_retransmit_count : 0) > 0)
+            ? (double)(totals->gap_cnt > totals->recovered_by_retransmit_count ? totals->gap_cnt - totals->recovered_by_retransmit_count : 0) / (double)(totals->unique_received_frames_total + (totals->gap_cnt > totals->recovered_by_retransmit_count ? totals->gap_cnt - totals->recovered_by_retransmit_count : 0))
+            : 0.0
     );
 
     write_log_line(files->log_fp, "INFO", msg);
@@ -903,6 +939,68 @@ static int build_bind_addr(const char *ip, int port, struct sockaddr_in *out) {
     return 0;
 }
 
+static void free_received_seq_tracker(ReceivedSeqTracker *tracker) {
+    if (!tracker) {
+        return;
+    }
+    free(tracker->bits);
+    *tracker = (ReceivedSeqTracker){0};
+}
+
+static int ensure_received_seq_capacity(ReceivedSeqTracker *tracker, uint32_t seq) {
+    size_t need = (size_t)seq / 8u + 1u;
+    size_t new_cap = 0;
+    uint8_t *new_bits = NULL;
+
+    if (!tracker) {
+        return -1;
+    }
+    if (need <= tracker->bytes_cap) {
+        return 0;
+    }
+    new_cap = tracker->bytes_cap ? tracker->bytes_cap : 1024u;
+    while (new_cap < need) {
+        if (new_cap > ((size_t)-1) / 2u) {
+            tracker->oom = true;
+            return -1;
+        }
+        new_cap *= 2u;
+    }
+    new_bits = realloc(tracker->bits, new_cap);
+    if (!new_bits) {
+        tracker->oom = true;
+        return -1;
+    }
+    memset(new_bits + tracker->bytes_cap, 0, new_cap - tracker->bytes_cap);
+    tracker->bits = new_bits;
+    tracker->bytes_cap = new_cap;
+    return 0;
+}
+
+static int mark_received_seq(ReceivedSeqTracker *tracker, uint32_t seq, bool *was_seen, bool *is_recovered) {
+    uint8_t mask = (uint8_t)(1u << (seq % 8u));
+    size_t idx = (size_t)seq / 8u;
+
+    if (!tracker || !was_seen || !is_recovered) {
+        return -1;
+    }
+    *was_seen = false;
+    *is_recovered = false;
+    if (ensure_received_seq_capacity(tracker, seq) != 0) {
+        return -1;
+    }
+    *was_seen = (tracker->bits[idx] & mask) != 0;
+    if (!*was_seen) {
+        *is_recovered = tracker->has_highest_seq && seq < tracker->highest_seq;
+        tracker->bits[idx] |= mask;
+        if (!tracker->has_highest_seq || seq > tracker->highest_seq) {
+            tracker->highest_seq = seq;
+            tracker->has_highest_seq = true;
+        }
+    }
+    return 0;
+}
+
 static WindowStats *select_window_stats(RxTimingState *ts) {
     if (ts->recv_now_ns >= ts->next_stats_ns) {
         ts->target_idx = (ts->win_idx + 1) % 2;
@@ -930,6 +1028,10 @@ static void update_seq_stats(
             ts->gap = seq_value - seq->prev_seq - 1;
             totals->gap_cnt += ts->gap;
             win->gap_cnt += ts->gap;
+            if (win->retransmit_count == 0 && ts->gap > 0) {
+                win->retransmit_start_seq = seq->prev_seq + 1u;
+                win->retransmit_count = (ts->gap > UINT32_MAX) ? UINT32_MAX : (uint32_t)ts->gap;
+            }
             seq->prev_seq = seq_value;
         } else if (seq_value < seq->prev_seq) {
             totals->reord_cnt++;
@@ -1021,7 +1123,8 @@ static int send_feedback_window(
     const struct sockaddr_in *feedback_addr,
     const RxFiles *files,
     RxTimingState *ts,
-    WindowStats *win
+    WindowStats *win,
+    bool retransmit_request_enabled
 ) {
     uint8_t wire[FEEDBACK_V1_WIRE_LEN];
     size_t wire_len = 0;
@@ -1038,6 +1141,9 @@ static int send_feedback_window(
     packet.feedback_version = FEEDBACK_V1_VERSION;
     packet.header_len = FEEDBACK_V1_HEADER_LEN;
     packet.flags = 0;
+    if (retransmit_request_enabled && win->retransmit_count > 0) {
+        packet.flags |= FEEDBACK_V1_FLAG_RETRANSMIT_REQUEST;
+    }
     packet.feedback_seq = ts->feedback_seq;
     packet.window_start_ns = ts->last_stats_wall_ns;
     packet.window_end_ns = ts->next_stats_ns;
@@ -1045,6 +1151,10 @@ static int send_feedback_window(
     packet.missing_delta = clamp_u64_to_u32(win->gap_cnt);
     packet.missing_rate_ppm = missing_rate_ppm_from_window(win->recv_ok, win->gap_cnt);
     packet.p99_latency_us = clamp_u64_to_u32(p99_ns / UINT64_C(1000));
+    if (retransmit_request_enabled && win->retransmit_count > 0) {
+        packet.retransmit_start_seq = win->retransmit_start_seq;
+        packet.retransmit_count = win->retransmit_count;
+    }
 
     if (feedback_v1_build(&packet, wire, sizeof(wire), &wire_len) != 0) {
         write_log_line(files ? files->log_fp : NULL, "ERROR", "feedback_v1_build failed");
@@ -1071,12 +1181,14 @@ static int send_feedback_window(
     }
 
     snprintf(msg, sizeof(msg),
-             "feedback sent seq=%lu recv_ok=%lu missing_delta=%lu missing_rate_ppm=%lu p99_latency_us=%lu",
+             "feedback sent seq=%lu recv_ok=%lu missing_delta=%lu missing_rate_ppm=%lu p99_latency_us=%lu retransmit_start_seq=%lu retransmit_count=%lu",
              (unsigned long)packet.feedback_seq,
              (unsigned long)packet.recv_ok,
              (unsigned long)packet.missing_delta,
              (unsigned long)packet.missing_rate_ppm,
-             (unsigned long)packet.p99_latency_us);
+             (unsigned long)packet.p99_latency_us,
+             (unsigned long)packet.retransmit_start_seq,
+             (unsigned long)packet.retransmit_count);
     write_log_line(files ? files->log_fp : NULL, "INFO", msg);
     ts->feedback_seq++;
     return 0;
@@ -1464,6 +1576,7 @@ int main(int argc, char **argv) {
     RxTotals totals = {0};
     RxTimingState ts = {0};
     SeqState seq_state = {0};
+    ReceivedSeqTracker received_tracker = {0};
     RxLinkFsm link_fsm = {
         .state = RX_LINK_STATE_NORMAL,
     };
@@ -1565,10 +1678,11 @@ int main(int argc, char **argv) {
             return 1;
         }
         snprintf(buf, sizeof(buf),
-                 "feedback enabled dst=%s:%d format=v1 len=%u",
+                 "feedback enabled dst=%s:%d format=v1 len=%u retransmit_request=%s",
                  cfg.feedback_dst_ip,
                  cfg.feedback_dst_port,
-                 FEEDBACK_V1_WIRE_LEN);
+                 FEEDBACK_V1_WIRE_LEN,
+                 cfg.retransmit_request_enabled ? "on" : "off");
         write_log_line(files.log_fp, "INFO", buf);
     }
 
@@ -1695,6 +1809,18 @@ int main(int argc, char **argv) {
                     continue;
                 }
 
+                bool was_seen = false;
+                bool is_recovered = false;
+                if (mark_received_seq(&received_tracker, parsed.header.seq, &was_seen, &is_recovered) == 0) {
+                    if (was_seen) {
+                        totals.duplicate_frames_total++;
+                    } else {
+                        totals.unique_received_frames_total++;
+                        if (is_recovered) {
+                            totals.recovered_by_retransmit_count++;
+                        }
+                    }
+                }
                 update_seq_stats(parsed.header.seq, &seq_state, &totals, &ts, win);
                 update_latency_stats(parsed.header.tx_ts, &totals, &ts, win);
                 write_per_recv_csv(&files, &ts, parsed.header.seq, parsed.header.tx_ts);
@@ -1713,7 +1839,7 @@ int main(int argc, char **argv) {
             ts.cur_idx = ts.win_idx % 2;
             evaluate_fsm_window(&files, &cfg, &ts, &ts.win_stats[ts.cur_idx], &link_fsm, ts.next_stats_ns);
             write_log_per_1sec(&files, &ts, &ts.win_stats[ts.cur_idx]);
-            send_feedback_window(feedback_sock, &feedback_addr, &files, &ts, &ts.win_stats[ts.cur_idx]);
+            send_feedback_window(feedback_sock, &feedback_addr, &files, &ts, &ts.win_stats[ts.cur_idx], cfg.retransmit_request_enabled);
 
             ts.next_stats_ns += 1000000000ULL;
             reset_window_stats(&ts.win_stats[ts.cur_idx]);
@@ -1741,6 +1867,7 @@ int main(int argc, char **argv) {
     close(sock);
     free(totals.latency_samples_ns);
     free_timing_windows(&ts);
+    free_received_seq_tracker(&received_tracker);
 
     printf("rx finished\n");
     return 0;

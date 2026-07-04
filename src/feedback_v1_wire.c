@@ -65,6 +65,8 @@ int feedback_v1_build(const FeedbackV1Packet *packet, uint8_t *out, size_t out_c
     put_u32_be(&out[28], packet->missing_delta);
     put_u32_be(&out[32], packet->missing_rate_ppm);
     put_u32_be(&out[36], packet->p99_latency_us);
+    put_u32_be(&out[40], packet->retransmit_start_seq);
+    put_u32_be(&out[44], packet->retransmit_count);
 
     if (out_len) {
         *out_len = FEEDBACK_V1_WIRE_LEN;
@@ -90,5 +92,7 @@ int feedback_v1_parse(const uint8_t *buf, size_t len, FeedbackV1Packet *out) {
     out->missing_delta = get_u32_be(&buf[28]);
     out->missing_rate_ppm = get_u32_be(&buf[32]);
     out->p99_latency_us = get_u32_be(&buf[36]);
+    out->retransmit_start_seq = get_u32_be(&buf[40]);
+    out->retransmit_count = get_u32_be(&buf[44]);
     return 0;
 }
