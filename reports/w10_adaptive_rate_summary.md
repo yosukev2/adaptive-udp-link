@@ -15,15 +15,23 @@
 
 ## 結論
 
-- OFF は rate_hz=120000 固定。10試行平均の missing rate は 2.8919%、中央値は 2.3979%。
+- OFF は rate_hz=120000 固定。10試行平均の missing rate は 2.8919%、中央値は 2.3979%。同一rateでも run2〜4 は約0.6%、run8〜10 は約5.5〜6.0% で、試行間のばらつきが大きい。
 - ON は missing 検出で rate_hz を下げた。10試行平均の最終 rate_hz は 57232、中央値は 60172。
-- ON 全10試行平均の missing rate は 2.7661%、中央値は 2.3070%。平均・中央値とも OFF より低い。
-- ON は 3/10 試行で missing rate < 1% に収まった。安定試行平均は 0.2497%。
-- ON の外れ試行は 7/10 試行で、対象は run1(8.1942%), run4(2.1432%), run6(2.4709%), run7(3.4488%), run8(5.5732%), run9(3.4365%), run10(1.6455%)。
+- ON 全10試行平均の missing rate は 2.7661%、中央値は 2.3070%。OFF よりわずかに低いが、差は小さい。
+- 一方で、受信できたframe総数は OFF 34,958,871、ON 18,827,169。ON は受信率を小幅に改善したが、送信rateを大きく下げたため、受信総量は OFF の約54% まで減った。
 - latency は全10試行の中央値ベースでは ON が悪い。avg latency median は OFF 0.292 ms、ON 1.052 ms。
-- CPU 使用率も ON が低い。avg cpu pct は OFF 31.00%、ON 18.18%。
-- したがって追加10試行では、adaptive ON は missing と CPU では小幅に改善したが、latency は悪化している。安定試行だけを見ると良いが、外れ試行が多く、現状は制御方針の有効性は見えるが完成度は不足。
-- 残課題は外れ試行の抑制。初期 decrease の強さ、missing spike 後の recovery、feedback window の安定判定を調整する余地がある。
+- CPU 使用率は ON が低い。avg cpu pct は OFF 31.00%、ON 18.18%。これは主に送信rateが下がったためと考える。
+- したがって今回の条件では、rate_hz を下げる adaptive 制御だけで missing を安定的に制御する効果は限定的。missing は平均rateだけでなく、一時的な受信詰まり・スケジューリング・socket queue などの影響を強く受けている可能性が高い。
+- rate down は緊急退避としては有効だが、総受信データ数を最大化する主手段には向きにくい。次の方向性は feedback による再送、FEC、または receive loop / buffer 側の改善が妥当。
+
+## 受信できたframe数の比較
+
+| mode | trials | received frames total | missing frames total | expected frames total | received rate | received frames avg/trial |
+|---|---:|---:|---:|---:|---:|---:|
+| off | 10 | 34,958,871 | 1,041,099 | 35,999,970 | 97.1081% | 3,495,887 |
+| on | 10 | 18,827,169 | 489,057 | 19,316,226 | 97.4682% | 1,882,717 |
+
+ON は received rate だけ見ると少し良いが、rate_hz を大きく下げるため、受信できたframe総数は OFF より大幅に少ない。
 
 ## ON/OFF 集計比較
 
