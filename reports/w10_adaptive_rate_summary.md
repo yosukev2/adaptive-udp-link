@@ -66,6 +66,8 @@ missing rate は adaptive feedback window ごとの値。rate_hz は tx が次�
 
 ![OFF/ON boxplot](figures/w10_adaptive_off_on_boxplot.png)
 
+![Missing rate histogram](figures/w10_adaptive_missing_rate_histogram.png)
+
 ![ON run1](figures/w10_adaptive_on_run1_missing_rate_rate_hz.png)
 
 ![ON run2](figures/w10_adaptive_on_run2_missing_rate_rate_hz.png)
@@ -90,4 +92,4 @@ missing rate は adaptive feedback window ごとの値。rate_hz は tx が次�
 
 - run summary CSV: `reports/w10_adaptive_rate_run_summary.csv`
 - report: `reports/w10_adaptive_rate_summary.md`
-- figures: `reports/figures/w10_adaptive_on_*.png`, `reports/figures/w10_adaptive_off_on_boxplot.png`
+- figures: `reports/figures/w10_adaptive_on_*.png`, `reports/figures/w10_adaptive_off_on_boxplot.png`, `reports/figures/w10_adaptive_missing_rate_histogram.png`
