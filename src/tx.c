@@ -79,6 +79,9 @@ typedef struct {
     int adaptive_max_rate_hz;
     int adaptive_debug_set_rate_hz;
     double adaptive_high_latency_ms;
+    int retransmit_enabled;
+    int retransmit_buffer_datagrams;
+    int retransmit_max_datagrams_per_feedback;
 } TxConfig;
 
 typedef struct {
@@ -89,7 +92,25 @@ typedef struct {
 typedef struct {
     uint32_t seq;
     uint32_t sent;
+    uint64_t retransmit_requested_frames;
+    uint64_t retransmit_sent_datagrams;
+    uint64_t retransmit_sent_frames;
+    uint64_t retransmit_buffer_miss_count;
 } TxTotals;
+
+typedef struct {
+    uint32_t start_seq;
+    uint32_t frame_count;
+    size_t len;
+    int valid;
+    uint8_t bytes[TX_FRAMES_PER_DATAGRAM * FRAME_V1_MAX_WIRE_BYTES];
+} TxStoredDatagram;
+
+typedef struct {
+    TxStoredDatagram *items;
+    size_t cap;
+    size_t next;
+} TxRetransmitBuffer;
 
 typedef struct {
     struct timespec next_send;  // 次回送信予定時刻（絶対時刻, CLOCK_MONOTONIC）
@@ -132,7 +153,8 @@ static void print_usage(const char *prog) {
             " [--outage-at-sec <sec> --outage-duration-ms <ms>]"
             " [--feedback-bind-ip <ip> --feedback-bind-port <port> --adaptive-log-path <path>]"
             " [--adaptive-mode off|on] [--adaptive-min-rate-hz <hz>] [--adaptive-max-rate-hz <hz>]"
-            " [--adaptive-high-latency-ms <ms>] [--adaptive-debug-set-rate-hz <hz>]\n",
+            " [--adaptive-high-latency-ms <ms>] [--adaptive-debug-set-rate-hz <hz>]"
+            " [--retransmit-mode off|on] [--retransmit-buffer-datagrams <n>] [--retransmit-max-datagrams-per-feedback <n>]\n",
             prog);
 }
 
@@ -175,6 +197,8 @@ static int parse_args(int argc, char **argv, TxConfig *cfg) {
     cfg->adaptive_min_rate_hz = 1;
     cfg->adaptive_max_rate_hz = 1000000;
     cfg->adaptive_high_latency_ms = 0.0;
+    cfg->retransmit_buffer_datagrams = 4096;
+    cfg->retransmit_max_datagrams_per_feedback = 256;
 
     static struct option long_opts[] = {
         {"dst-ip", required_argument, 0, 1},
@@ -198,6 +222,9 @@ static int parse_args(int argc, char **argv, TxConfig *cfg) {
         {"adaptive-max-rate-hz", required_argument, 0, 19},
         {"adaptive-debug-set-rate-hz", required_argument, 0, 20},
         {"adaptive-high-latency-ms", required_argument, 0, 21},
+        {"retransmit-mode", required_argument, 0, 22},
+        {"retransmit-buffer-datagrams", required_argument, 0, 23},
+        {"retransmit-max-datagrams-per-feedback", required_argument, 0, 24},
         {0, 0, 0, 0}
     };
 
@@ -351,6 +378,31 @@ static int parse_args(int argc, char **argv, TxConfig *cfg) {
                     return -1;
                 }
                 break;
+            case 22:
+                if (strcmp(optarg, "on") == 0) {
+                    cfg->retransmit_enabled = 1;
+                } else if (strcmp(optarg, "off") == 0) {
+                    cfg->retransmit_enabled = 0;
+                } else {
+                    fprintf(stderr, "Invalid --retransmit-mode: %s\n", optarg);
+                    print_usage(argv[0]);
+                    return -1;
+                }
+                break;
+            case 23:
+                if (parse_int(optarg, &cfg->retransmit_buffer_datagrams) != 0) {
+                    fprintf(stderr, "Invalid --retransmit-buffer-datagrams: %s\n", optarg);
+                    print_usage(argv[0]);
+                    return -1;
+                }
+                break;
+            case 24:
+                if (parse_int(optarg, &cfg->retransmit_max_datagrams_per_feedback) != 0) {
+                    fprintf(stderr, "Invalid --retransmit-max-datagrams-per-feedback: %s\n", optarg);
+                    print_usage(argv[0]);
+                    return -1;
+                }
+                break;
             default:
                 print_usage(argv[0]);
                 return -1;
@@ -413,6 +465,15 @@ static int parse_args(int argc, char **argv, TxConfig *cfg) {
         print_usage(argv[0]);
         return -1;
     }
+    if (cfg->retransmit_buffer_datagrams <= 0) {
+        fprintf(stderr, "Invalid --retransmit-buffer-datagrams: %d\n", cfg->retransmit_buffer_datagrams);
+        return -1;
+    }
+    if (cfg->retransmit_max_datagrams_per_feedback <= 0) {
+        fprintf(stderr, "Invalid --retransmit-max-datagrams-per-feedback: %d\n", cfg->retransmit_max_datagrams_per_feedback);
+        return -1;
+    }
+
     cfg->feedback_enabled = cfg->feedback_bind_ip && cfg->feedback_bind_port > 0 && cfg->adaptive_log_path;
 
     if (cfg->adaptive_min_rate_hz <= 0 || cfg->adaptive_max_rate_hz <= 0 ||
@@ -463,7 +524,7 @@ static int open_output_files(const TxConfig *config, TxFiles *files) {
             return -1;
         }
         fprintf(files->adaptive_log_fp,
-                "elapsed_sec,feedback_seq,missing_delta,missing_rate,p99_latency_ms,old_rate_hz,new_rate_hz,action,reason,stable_windows\n");
+                "elapsed_sec,feedback_seq,missing_delta,missing_rate,p99_latency_ms,old_rate_hz,new_rate_hz,action,reason,stable_windows,retransmit_start_seq,retransmit_count,retransmit_sent_datagrams,retransmit_buffer_miss\n");
         fflush(files->adaptive_log_fp);
     }
     return 0;
@@ -628,11 +689,16 @@ static void write_summary(const TxFiles *files, const TxTotals *totals, uint64_t
     snprintf(
         msg,
         sizeof(msg),
-        "tx summary sent=%lu last_seq=%lu elapsed_sec=%.3f avg_rate_hz=%.2f",
+        "tx summary sent=%lu last_seq=%lu elapsed_sec=%.3f avg_rate_hz=%.2f"
+        " retransmit_requested_frames=%llu retransmit_sent_datagrams=%llu retransmit_sent_frames=%llu retransmit_buffer_miss_count=%llu",
         (unsigned long)totals->sent,
         (unsigned long)((totals->seq == 0) ? 0 : (totals->seq - 1)),
         (double)elapsed_ns / 1e9,
-        avg_rate
+        avg_rate,
+        (unsigned long long)totals->retransmit_requested_frames,
+        (unsigned long long)totals->retransmit_sent_datagrams,
+        (unsigned long long)totals->retransmit_sent_frames,
+        (unsigned long long)totals->retransmit_buffer_miss_count
     );
 
     write_log_line(files->log_fp, "INFO", msg);
@@ -806,7 +872,113 @@ static int open_feedback_socket(const TxConfig *cfg, const TxFiles *files) {
     return sock;
 }
 
-static void process_feedback_packets(int feedback_sock, const TxConfig *cfg, TxFiles *files, TxRateState *rate, uint64_t now_ns, uint64_t t_start_ns) {
+static int tx_retransmit_buffer_init(TxRetransmitBuffer *buf, size_t cap) {
+    if (!buf || cap == 0) {
+        return -1;
+    }
+    buf->items = calloc(cap, sizeof(buf->items[0]));
+    if (!buf->items) {
+        return -1;
+    }
+    buf->cap = cap;
+    buf->next = 0;
+    return 0;
+}
+
+static void tx_retransmit_buffer_free(TxRetransmitBuffer *buf) {
+    if (!buf) {
+        return;
+    }
+    free(buf->items);
+    *buf = (TxRetransmitBuffer){0};
+}
+
+static void tx_retransmit_buffer_store(TxRetransmitBuffer *buf, uint32_t start_seq, const uint8_t *bytes, size_t len) {
+    TxStoredDatagram *slot = NULL;
+    if (!buf || !buf->items || buf->cap == 0 || !bytes || len > sizeof(slot->bytes)) {
+        return;
+    }
+    slot = &buf->items[buf->next];
+    memset(slot, 0, sizeof(*slot));
+    slot->start_seq = start_seq;
+    slot->frame_count = TX_FRAMES_PER_DATAGRAM;
+    slot->len = len;
+    slot->valid = 1;
+    memcpy(slot->bytes, bytes, len);
+    buf->next = (buf->next + 1u) % buf->cap;
+}
+
+static int ranges_overlap(uint32_t a_start, uint32_t a_count, uint32_t b_start, uint32_t b_count) {
+    uint64_t a_end = (uint64_t)a_start + (uint64_t)a_count;
+    uint64_t b_end = (uint64_t)b_start + (uint64_t)b_count;
+    return (uint64_t)a_start < b_end && (uint64_t)b_start < a_end;
+}
+
+static uint32_t tx_retransmit_range(
+    int sock,
+    const struct sockaddr_in *dest,
+    const TxConfig *cfg,
+    TxFiles *files,
+    TxRetransmitBuffer *buf,
+    TxTotals *totals,
+    uint32_t start_seq,
+    uint32_t count,
+    uint32_t *out_buffer_miss
+) {
+    uint32_t sent_datagrams = 0;
+    uint32_t buffer_miss = 0;
+    char msg[256];
+
+    if (out_buffer_miss) {
+        *out_buffer_miss = 0;
+    }
+    if (!cfg || !cfg->retransmit_enabled || sock < 0 || !dest || !buf || !buf->items || count == 0) {
+        return 0;
+    }
+
+    for (size_t i = 0; i < buf->cap; i++) {
+        TxStoredDatagram *slot = &buf->items[i];
+        if (!slot->valid) {
+            continue;
+        }
+        if (!ranges_overlap(slot->start_seq, slot->frame_count, start_seq, count)) {
+            continue;
+        }
+        if (sent_datagrams >= (uint32_t)cfg->retransmit_max_datagrams_per_feedback) {
+            break;
+        }
+        ssize_t n = sendto(sock, slot->bytes, slot->len, 0, (const struct sockaddr *)dest, sizeof(*dest));
+        if (n < 0 || (size_t)n != slot->len) {
+            buffer_miss++;
+            continue;
+        }
+        sent_datagrams++;
+        if (totals) {
+            totals->retransmit_sent_datagrams++;
+            totals->retransmit_sent_frames += slot->frame_count;
+        }
+    }
+    if (sent_datagrams == 0) {
+        buffer_miss++;
+    }
+    if (totals) {
+        totals->retransmit_requested_frames += count;
+        totals->retransmit_buffer_miss_count += buffer_miss;
+    }
+    if (out_buffer_miss) {
+        *out_buffer_miss = buffer_miss;
+    }
+    snprintf(msg, sizeof(msg),
+             "retransmit request start_seq=%lu count=%lu sent_datagrams=%lu buffer_miss=%lu",
+             (unsigned long)start_seq,
+             (unsigned long)count,
+             (unsigned long)sent_datagrams,
+             (unsigned long)buffer_miss);
+    write_log_line(files ? files->log_fp : NULL, "INFO", msg);
+    return sent_datagrams;
+}
+
+static void process_feedback_packets(int feedback_sock, int data_sock, const struct sockaddr_in *dest, const TxConfig *cfg, TxFiles *files, TxRateState *rate, TxRetransmitBuffer *rtx_buf, TxTotals *totals, uint64_t now_ns, uint64_t t_start_ns) {
     uint8_t buf[FEEDBACK_V1_WIRE_LEN];
     char msg[256];
 
@@ -824,6 +996,8 @@ static void process_feedback_packets(int feedback_sock, const TxConfig *cfg, TxF
         int new_rate_hz = old_rate_hz;
         const char *action = "hold";
         const char *reason = "feedback_logged";
+        uint32_t retransmit_sent_datagrams = 0;
+        uint32_t retransmit_buffer_miss = 0;
 
         if (n < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -849,9 +1023,14 @@ static void process_feedback_packets(int feedback_sock, const TxConfig *cfg, TxF
             decide_adaptive_rate(cfg, rate, &packet, missing_rate, p99_latency_ms,
                                  &old_rate_hz, &new_rate_hz, &action, &reason);
         }
+        if (cfg->retransmit_enabled && (packet.flags & FEEDBACK_V1_FLAG_RETRANSMIT_REQUEST) && packet.retransmit_count > 0) {
+            retransmit_sent_datagrams = tx_retransmit_range(
+                data_sock, dest, cfg, files, rtx_buf, totals,
+                packet.retransmit_start_seq, packet.retransmit_count, &retransmit_buffer_miss);
+        }
 
         fprintf(files->adaptive_log_fp,
-                "%.3f,%lu,%lu,%.6f,%.3f,%d,%d,%s,%s,%d\n",
+                "%.3f,%lu,%lu,%.6f,%.3f,%d,%d,%s,%s,%d,%lu,%lu,%lu,%lu\n",
                 elapsed_sec,
                 (unsigned long)packet.feedback_seq,
                 (unsigned long)packet.missing_delta,
@@ -861,7 +1040,11 @@ static void process_feedback_packets(int feedback_sock, const TxConfig *cfg, TxF
                 new_rate_hz,
                 action,
                 reason,
-                rate ? rate->stable_windows : 0);
+                rate ? rate->stable_windows : 0,
+                (unsigned long)packet.retransmit_start_seq,
+                (unsigned long)packet.retransmit_count,
+                (unsigned long)retransmit_sent_datagrams,
+                (unsigned long)retransmit_buffer_miss);
         fflush(files->adaptive_log_fp);
 
         snprintf(msg, sizeof(msg),
@@ -969,6 +1152,7 @@ int main(int argc, char **argv) {
     int pending_first_frame_log = 0;
     char first_frame_log_msg[256] = {0};
     int feedback_sock = -1;
+    TxRetransmitBuffer rtx_buf = {0};
 
     if (parse_args(argc, argv, &cfg) != 0) {
         return 1;
@@ -1009,6 +1193,13 @@ int main(int argc, char **argv) {
                      fault_target_name(cfg.fault_target), (double)cfg.fault_rate);
             write_log_line(files.log_fp, "INFO", buf);
         }
+        if (cfg.retransmit_enabled) {
+            snprintf(buf, sizeof(buf),
+                     "retransmit enabled buffer_datagrams=%d max_datagrams_per_feedback=%d",
+                     cfg.retransmit_buffer_datagrams,
+                     cfg.retransmit_max_datagrams_per_feedback);
+            write_log_line(files.log_fp, "INFO", buf);
+        }
         if (cfg.outage_enabled) {
             snprintf(buf, sizeof(buf),
                      "outage configured at_sec=%d duration_ms=%d",
@@ -1040,6 +1231,15 @@ int main(int argc, char **argv) {
         close(sock);
         close_output_files(&files);
         return 1;
+    }
+
+    if (cfg.retransmit_enabled) {
+        if (tx_retransmit_buffer_init(&rtx_buf, (size_t)cfg.retransmit_buffer_datagrams) != 0) {
+            write_log_line(files.log_fp, "ERROR", "retransmit buffer allocation failed");
+            close(sock);
+            close_output_files(&files);
+            return 1;
+        }
     }
 
     if (cfg.feedback_enabled) {
@@ -1162,6 +1362,7 @@ int main(int argc, char **argv) {
         }
 
         // TX_FRAMES_PER_DATAGRAM 個のフレームを datagram_buf に連結してから 1 回の sendto で送る
+        uint32_t datagram_start_seq = totals.seq;
         size_t datagram_len = 0;
         int build_ok = 1;
         for (int fi = 0; fi < TX_FRAMES_PER_DATAGRAM && build_ok; fi++) {
@@ -1216,6 +1417,10 @@ int main(int argc, char **argv) {
             break;
         }
 
+        if (cfg.retransmit_enabled) {
+            tx_retransmit_buffer_store(&rtx_buf, datagram_start_seq, datagram_buf, datagram_len);
+        }
+
         totals.seq += TX_FRAMES_PER_DATAGRAM;
         totals.sent++;
 
@@ -1224,7 +1429,7 @@ int main(int argc, char **argv) {
             pending_first_frame_log = 0;
         }
 
-        process_feedback_packets(feedback_sock, &cfg, &files, &rate, ts.tx_ts_ns, ts.t_start_ns);
+        process_feedback_packets(feedback_sock, sock, &dest, &cfg, &files, &rate, &rtx_buf, &totals, ts.tx_ts_ns, ts.t_start_ns);
 
         while (ts.tx_ts_ns >= ts.next_stats_ns) {
             write_stats_per_1sec(&files, &ts, &totals);
@@ -1232,7 +1437,7 @@ int main(int argc, char **argv) {
         }
     }
 
-    process_feedback_packets(feedback_sock, &cfg, &files, &rate, ts.now_ns, ts.t_start_ns);
+    process_feedback_packets(feedback_sock, sock, &dest, &cfg, &files, &rate, &rtx_buf, &totals, ts.now_ns, ts.t_start_ns);
 
     if (feedback_sock >= 0) {
         close(feedback_sock);
@@ -1265,6 +1470,7 @@ int main(int argc, char **argv) {
         write_summary(&files, &totals, elapsed_ns);
         write_log_line(files.log_fp, "INFO", "tx end");
     }
+    tx_retransmit_buffer_free(&rtx_buf);
     close_output_files(&files);
 
     printf("tx finished\n");

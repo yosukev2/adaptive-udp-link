@@ -23,8 +23,8 @@ floatは使わず、rateやlatencyは整数スケール値で送る。
 | offset | size | field | type | unit | description |
 | --- | --- | --- | --- | --- | --- |
 | 0 | 1 | feedback_version | uint8 | - | format version。初期値は1 |
-| 1 | 1 | header_len | uint8 | bytes | v1では40 |
-| 2 | 2 | flags | uint16 | bitfield | v1では0 |
+| 1 | 1 | header_len | uint8 | bytes | v1では48 |
+| 2 | 2 | flags | uint16 | bitfield | bit0: retransmit requestあり |
 | 4 | 4 | feedback_seq | uint32 | packets | RXがfeedback送信ごとに+1 |
 | 8 | 8 | window_start_ns | uint64 | ns | RX側1秒window開始時刻、CLOCK_MONOTONIC |
 | 16 | 8 | window_end_ns | uint64 | ns | RX側1秒window終了時刻、CLOCK_MONOTONIC |
@@ -32,8 +32,10 @@ floatは使わず、rateやlatencyは整数スケール値で送る。
 | 28 | 4 | missing_delta | uint32 | frames | window内で新たに観測したmissing増分 |
 | 32 | 4 | missing_rate_ppm | uint32 | ppm | `missing_delta / (recv_ok + missing_delta) * 1,000,000` |
 | 36 | 4 | p99_latency_us | uint32 | us | RX側1秒window内のP99 latency |
+| 40 | 4 | retransmit_start_seq | uint32 | frames | 再送要求rangeの先頭seq。要求なしなら0 |
+| 44 | 4 | retransmit_count | uint32 | frames | 再送要求frame数。要求なしなら0 |
 
-v1 payload sizeは40 bytesとする。
+v1 payload sizeは48 bytesとする。
 
 ## field semantics
 
@@ -72,6 +74,12 @@ missing_rate_ppm = missing_delta * 1,000,000 / max(1, recv_ok + missing_delta)
 RX側1秒window内で計算したP99 latencyをmicrosecond整数で送る。
 既存CSVの latency_ns から算出する場合は `latency_ns / 1000` を使う。
 
+### retransmit_start_seq / retransmit_count
+
+#173 の再送実験用field。RXがwindow内でmissing rangeを観測した場合、flags bit0を立て、最初に観測したmissing rangeをこの2 fieldで通知する。
+
+TXは保持しているbounded retransmit buffer内に該当datagramが残っている場合のみ再送する。bufferに残っていない場合は回復不可として扱う。
+
 ## TX側の欠落時挙動
 
 feedback packetが届かないwindowがあっても、TXは現在のrate_hzを維持する。
@@ -81,10 +89,12 @@ feedback packetが届かないwindowがあっても、TXは現在のrate_hzを�
 
 - adaptive rate更新policy
 - FEC制御policy
+- 本格ARQ
 - 長期binary互換性
 - data frame format変更
 
 ## 参照Issue
 
 - #150
+- #173
 - parent: #149
