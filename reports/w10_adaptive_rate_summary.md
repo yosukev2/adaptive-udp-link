@@ -68,7 +68,9 @@ missing rate は adaptive feedback window ごとの値。rate_hz は tx が次�
 
 ![OFF/ON boxplot](figures/w10_adaptive_off_on_boxplot.png)
 
-![Missing rate histogram](figures/w10_adaptive_missing_rate_histogram.png)
+![Missing rate histogram by feedback window](figures/w10_adaptive_missing_rate_histogram.png)
+
+missing rate histogram は trial単位ではなく、OFF/ON 各10試行の約1秒 feedback window をすべて含めた分布。
 
 ![ON run1](figures/w10_adaptive_on_run1_missing_rate_rate_hz.png)
 
