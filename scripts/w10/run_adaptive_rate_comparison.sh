@@ -7,6 +7,8 @@ RX_DURATION_SEC=${RX_DURATION_SEC:-32}
 DATA_PORT=${DATA_PORT:-20001}
 FEEDBACK_PORT=${FEEDBACK_PORT:-20000}
 TRIALS=${TRIALS:-"1 2 3"}
+RX_CORE=${RX_CORE:-2}
+TX_CORE=${TX_CORE:-3}
 ADAPTIVE_MIN_RATE_HZ=${ADAPTIVE_MIN_RATE_HZ:-1000}
 ADAPTIVE_MAX_RATE_HZ=${ADAPTIVE_MAX_RATE_HZ:-500000}
 ADAPTIVE_HIGH_LATENCY_MS=${ADAPTIVE_HIGH_LATENCY_MS:-0}
@@ -33,6 +35,8 @@ mkdir -p "$DATA_DIR" "$LOG_DIR"
   echo "- adaptive_max_rate_hz: $ADAPTIVE_MAX_RATE_HZ"
   echo "- adaptive_high_latency_ms: $ADAPTIVE_HIGH_LATENCY_MS"
   echo "- trials: $TRIALS"
+  echo "- rx_core: $RX_CORE"
+  echo "- tx_core: $TX_CORE"
   echo
 } >> "$DATA_DIR/run_metadata.md"
 
@@ -52,12 +56,12 @@ for mode in off on; do
       echo
       echo "- time: $(date --iso-8601=seconds)"
       echo "- run_dir: $run_dir"
-      echo "- rx_cmd: ./bin/rx --bind-ip 127.0.0.1 --port $DATA_PORT --duration-sec $RX_DURATION_SEC --log-path $rx_log --feedback-dst-ip 127.0.0.1 --feedback-dst-port $FEEDBACK_PORT --csv-in-1sec-log-path $rx_1sec --csv-by-1recv-log-path $rx_by_1recv"
-      echo "- tx_cmd: ./bin/tx --dst-ip 127.0.0.1 --dst-port $DATA_PORT --rate-hz $INITIAL_RATE_HZ --duration-sec $TX_DURATION_SEC --log-path $tx_log --feedback-bind-ip 127.0.0.1 --feedback-bind-port $FEEDBACK_PORT --adaptive-log-path $adaptive_log --adaptive-mode $mode --adaptive-min-rate-hz $ADAPTIVE_MIN_RATE_HZ --adaptive-max-rate-hz $ADAPTIVE_MAX_RATE_HZ --adaptive-high-latency-ms $ADAPTIVE_HIGH_LATENCY_MS"
+      echo "- rx_cmd: taskset -c $RX_CORE ./bin/rx --bind-ip 127.0.0.1 --port $DATA_PORT --duration-sec $RX_DURATION_SEC --log-path $rx_log --feedback-dst-ip 127.0.0.1 --feedback-dst-port $FEEDBACK_PORT --csv-in-1sec-log-path $rx_1sec --csv-by-1recv-log-path $rx_by_1recv"
+      echo "- tx_cmd: taskset -c $TX_CORE ./bin/tx --dst-ip 127.0.0.1 --dst-port $DATA_PORT --rate-hz $INITIAL_RATE_HZ --duration-sec $TX_DURATION_SEC --log-path $tx_log --feedback-bind-ip 127.0.0.1 --feedback-bind-port $FEEDBACK_PORT --adaptive-log-path $adaptive_log --adaptive-mode $mode --adaptive-min-rate-hz $ADAPTIVE_MIN_RATE_HZ --adaptive-max-rate-hz $ADAPTIVE_MAX_RATE_HZ --adaptive-high-latency-ms $ADAPTIVE_HIGH_LATENCY_MS"
       echo
     } >> "$DATA_DIR/run_metadata.md"
 
-    ./bin/rx \
+    taskset -c "$RX_CORE" ./bin/rx \
       --bind-ip 127.0.0.1 \
       --port "$DATA_PORT" \
       --duration-sec "$RX_DURATION_SEC" \
@@ -72,7 +76,7 @@ for mode in off on; do
     sleep 0.5
 
     set +e
-    ./bin/tx \
+    taskset -c "$TX_CORE" ./bin/tx \
       --dst-ip 127.0.0.1 \
       --dst-port "$DATA_PORT" \
       --rate-hz "$INITIAL_RATE_HZ" \
