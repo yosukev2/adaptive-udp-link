@@ -136,6 +136,7 @@ typedef struct {
     uint64_t latency_sample_cnt;
     uint64_t max_latency_ns;
     uint64_t min_latency_ns;
+    uint64_t recovered_by_fec_count;
     uint64_t *latency_samples_ns;
     size_t latency_samples_len;
     size_t latency_samples_cap;
@@ -1184,6 +1185,8 @@ static int send_feedback_window(
         return 0;
     }
 
+    uint64_t feedback_missing_delta = (win->gap_cnt > win->recovered_by_fec_count) ? (win->gap_cnt - win->recovered_by_fec_count) : 0;
+
     p99_ns = window_latency_p99_ns(win);
     packet.feedback_version = FEEDBACK_V1_VERSION;
     packet.header_len = FEEDBACK_V1_HEADER_LEN;
@@ -1195,8 +1198,8 @@ static int send_feedback_window(
     packet.window_start_ns = ts->last_stats_wall_ns;
     packet.window_end_ns = ts->next_stats_ns;
     packet.recv_ok = clamp_u64_to_u32(win->recv_ok);
-    packet.missing_delta = clamp_u64_to_u32(win->gap_cnt);
-    packet.missing_rate_ppm = missing_rate_ppm_from_window(win->recv_ok, win->gap_cnt);
+    packet.missing_delta = clamp_u64_to_u32(feedback_missing_delta);
+    packet.missing_rate_ppm = missing_rate_ppm_from_window(win->recv_ok, feedback_missing_delta);
     packet.p99_latency_us = clamp_u64_to_u32(p99_ns / UINT64_C(1000));
     if (retransmit_request_enabled && win->retransmit_count > 0) {
         packet.retransmit_start_seq = win->retransmit_start_seq;
@@ -1623,6 +1626,9 @@ static void process_parsed_frame_common(
             totals->unique_received_frames_total++;
             if (fec_recovered) {
                 totals->recovered_by_fec_count++;
+                if (win) {
+                    win->recovered_by_fec_count++;
+                }
             } else if (is_recovered) {
                 totals->recovered_by_retransmit_count++;
             }
