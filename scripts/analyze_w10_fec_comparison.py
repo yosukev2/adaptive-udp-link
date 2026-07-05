@@ -251,6 +251,8 @@ def write_report(rows: list[dict[str, object]], report: Path, summary_csv: Path,
     if metadata_path.exists():
         lines += ["## 実験条件", ""]
         for line in metadata_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("## fec_mode="):
+                break
             if line.startswith("- "):
                 lines.append(line)
         lines.append("")

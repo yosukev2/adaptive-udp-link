@@ -17,6 +17,7 @@ DATA_DIR=${DATA_DIR:-"data/w10/fec_comparison"}
 LOG_DIR=${LOG_DIR:-"logs/w10/fec_comparison"}
 SUMMARY_CSV=${SUMMARY_CSV:-"$DATA_DIR/fec_comparison.csv"}
 REPORT=${REPORT:-"reports/w10_fec_comparison_summary.md"}
+RX_BY_1RECV=${RX_BY_1RECV:-1}
 
 mkdir -p "$DATA_DIR" "$LOG_DIR"
 : > "$DATA_DIR/run_metadata.md"
@@ -41,6 +42,7 @@ make -j4
   echo "- tx_core: $TX_CORE"
   echo "- data_dir: $DATA_DIR"
   echo "- log_dir: $LOG_DIR"
+  echo "- rx_by_1recv: $RX_BY_1RECV"
   echo
   echo "## 固定条件"
   echo
@@ -78,6 +80,12 @@ for mode in off xor; do
     tx_log="$run_dir/tx.log"
     rx_1sec="$run_dir/rx_1sec.csv"
     rx_by_1recv="$run_dir/rx_by_1recv.csv"
+    rx_by_1recv_args=()
+    rx_by_1recv_cmd_suffix=""
+    if [ "$RX_BY_1RECV" != "0" ]; then
+      rx_by_1recv_args=(--csv-by-1recv-log-path "$rx_by_1recv")
+      rx_by_1recv_cmd_suffix=" --csv-by-1recv-log-path $rx_by_1recv"
+    fi
 
     {
       echo "## fec_mode=$mode trial=$trial"
@@ -85,7 +93,7 @@ for mode in off xor; do
       echo "- time: $(date --iso-8601=seconds)"
       echo "- seed: $seed"
       echo "- run_dir: $run_dir"
-      echo "- rx_cmd: taskset -c $RX_CORE ./bin/rx --bind-ip 127.0.0.1 --port $DATA_PORT --duration-sec $RX_DURATION_SEC --log-path $rx_log --link-name w10_fec_comparison --trial $trial --fec-mode $mode --csv-in-1sec-log-path $rx_1sec --csv-by-1recv-log-path $rx_by_1recv"
+      echo "- rx_cmd: taskset -c $RX_CORE ./bin/rx --bind-ip 127.0.0.1 --port $DATA_PORT --duration-sec $RX_DURATION_SEC --log-path $rx_log --link-name w10_fec_comparison --trial $trial --fec-mode $mode --csv-in-1sec-log-path $rx_1sec${rx_by_1recv_cmd_suffix}"
       echo "- tx_cmd: taskset -c $TX_CORE ./bin/tx --dst-ip 127.0.0.1 --dst-port $DATA_PORT --rate-hz $RATE_HZ --duration-sec $TX_DURATION_SEC --log-path $tx_log --payload-len 48 --version 1 --fec-mode $mode --drop-rate $DROP_RATE --drop-seed $seed --drop-target datagram"
       echo
     } >> "$DATA_DIR/run_metadata.md"
@@ -99,7 +107,7 @@ for mode in off xor; do
       --trial "$trial" \
       --fec-mode "$mode" \
       --csv-in-1sec-log-path "$rx_1sec" \
-      --csv-by-1recv-log-path "$rx_by_1recv" \
+      "${rx_by_1recv_args[@]}" \
       > "$run_dir/rx.stdout" 2> "$run_dir/rx.stderr" &
     rx_pid=$!
 
@@ -125,7 +133,9 @@ for mode in off xor; do
     rx_status=$?
     set -e
 
-    cp "$rx_by_1recv" "$DATA_DIR/fec_${mode}_run${trial}_rx_by_1recv.csv"
+    if [ "$RX_BY_1RECV" != "0" ]; then
+      cp "$rx_by_1recv" "$DATA_DIR/fec_${mode}_run${trial}_rx_by_1recv.csv"
+    fi
     cp "$rx_1sec" "$DATA_DIR/fec_${mode}_run${trial}_rx_1sec.csv"
 
     {
