@@ -68,6 +68,10 @@ typedef struct {
     int crc32_test_mode;        // ハードコードした v1 フレームで CRC32 を確認する
     FaultTarget fault_target;   // 故障注入の対象フィールド（FAULT_NONE = 無効）
     float fault_rate;           // 故障注入確率（0.0〜1.0）
+    float drop_rate;            // data datagram random drop probability (0.0..1.0)
+    int drop_seed;              // random drop seed for reproducibility
+    int drop_seed_set;          // --drop-seed が明示指定されたか
+    int drop_enabled;           // --drop-rate が明示指定されたか
     int outage_at_sec;          // 単発瞬断の開始時刻（tx 開始からの相対秒）
     int outage_duration_ms;     // 単発瞬断の継続時間（ms）
     int outage_at_sec_set;
@@ -110,6 +114,7 @@ typedef struct {
     uint64_t fec_data_datagrams;
     uint64_t fec_parity_datagrams;
     uint64_t dropped_datagrams;
+    uint64_t dropped_frames;
 } TxTotals;
 
 typedef struct {
@@ -175,6 +180,7 @@ static void print_usage(const char *prog) {
             " [--adaptive-high-latency-ms <ms>] [--adaptive-debug-set-rate-hz <hz>]"
             " [--retransmit-mode off|on] [--retransmit-buffer-datagrams <n>] [--retransmit-max-datagrams-per-feedback <n>]"
             " [--fec-mode off|xor] [--fec-k 4] [--fec-r 1] [--drop-datagram-every <n>]"
+            " [--drop-rate 0.0-1.0] [--drop-seed <uint>] [--drop-target datagram]"
             " [--adaptive-fec off|on] [--adaptive-fec-high-missing-rate <rate>]"
             " [--adaptive-fec-low-missing-rate <rate>] [--adaptive-fec-stable-windows <n>]\n",
             prog);
@@ -260,6 +266,9 @@ static int parse_args(int argc, char **argv, TxConfig *cfg) {
         {"adaptive-fec-high-missing-rate", required_argument, 0, 30},
         {"adaptive-fec-low-missing-rate", required_argument, 0, 31},
         {"adaptive-fec-stable-windows", required_argument, 0, 32},
+        {"drop-rate", required_argument, 0, 33},
+        {"drop-seed", required_argument, 0, 34},
+        {"drop-target", required_argument, 0, 35},
         {0, 0, 0, 0}
     };
 
@@ -502,6 +511,29 @@ static int parse_args(int argc, char **argv, TxConfig *cfg) {
                     return -1;
                 }
                 break;
+            case 33:
+                if (parse_float(optarg, &cfg->drop_rate) != 0) {
+                    fprintf(stderr, "Invalid --drop-rate: %s (expected 0.0-1.0)\n", optarg);
+                    print_usage(argv[0]);
+                    return -1;
+                }
+                cfg->drop_enabled = 1;
+                break;
+            case 34:
+                if (parse_int(optarg, &cfg->drop_seed) != 0) {
+                    fprintf(stderr, "Invalid --drop-seed: %s\n", optarg);
+                    print_usage(argv[0]);
+                    return -1;
+                }
+                cfg->drop_seed_set = 1;
+                break;
+            case 35:
+                if (strcmp(optarg, "datagram") != 0) {
+                    fprintf(stderr, "Invalid --drop-target: %s (expected datagram)\n", optarg);
+                    print_usage(argv[0]);
+                    return -1;
+                }
+                break;
             default:
                 print_usage(argv[0]);
                 return -1;
@@ -580,6 +612,10 @@ static int parse_args(int argc, char **argv, TxConfig *cfg) {
     }
     if (cfg->drop_datagram_every < 0) {
         fprintf(stderr, "Invalid --drop-datagram-every: %d (expected >= 0)\n", cfg->drop_datagram_every);
+        return -1;
+    }
+    if (cfg->drop_seed_set && cfg->drop_seed < 0) {
+        fprintf(stderr, "Invalid --drop-seed: %d (expected >= 0)\n", cfg->drop_seed);
         return -1;
     }
     if (cfg->fec_enabled && cfg->retransmit_enabled) {
@@ -821,7 +857,7 @@ static void write_summary(const TxFiles *files, const TxTotals *totals, uint64_t
         sizeof(msg),
         "tx summary sent=%lu last_seq=%lu elapsed_sec=%.3f avg_rate_hz=%.2f"
         " retransmit_requested_frames=%llu retransmit_sent_datagrams=%llu retransmit_sent_frames=%llu retransmit_buffer_miss_count=%llu"
-        " fec_mode=%s fec_k=%d fec_r=%d fec_data_datagrams=%llu fec_parity_datagrams=%llu dropped_datagrams=%llu",
+        " fec_mode=%s fec_k=%d fec_r=%d fec_data_datagrams=%llu fec_parity_datagrams=%llu dropped_datagrams=%llu dropped_frames=%llu",
         (unsigned long)totals->sent,
         (unsigned long)((totals->seq == 0) ? 0 : (totals->seq - 1)),
         (double)elapsed_ns / 1e9,
@@ -835,7 +871,8 @@ static void write_summary(const TxFiles *files, const TxTotals *totals, uint64_t
         FEC_V1_R_FIXED,
         (unsigned long long)totals->fec_data_datagrams,
         (unsigned long long)totals->fec_parity_datagrams,
-        (unsigned long long)totals->dropped_datagrams
+        (unsigned long long)totals->dropped_datagrams,
+        (unsigned long long)totals->dropped_frames
     );
 
     write_log_line(files->log_fp, "INFO", msg);
@@ -1385,8 +1422,8 @@ int main(int argc, char **argv) {
         return run_crc32_test_mode();
     }
 
-    // 故障注入の乱数シードを初期化
-    srand((unsigned int)time(NULL));
+    // 故障注入/random drop の乱数シードを初期化
+    srand(cfg.drop_seed_set ? (unsigned int)cfg.drop_seed : (unsigned int)time(NULL));
 
     if (open_output_files(&cfg, &files) != 0) {
         return 1;
@@ -1422,6 +1459,12 @@ int main(int argc, char **argv) {
                      "retransmit enabled buffer_datagrams=%d max_datagrams_per_feedback=%d",
                      cfg.retransmit_buffer_datagrams,
                      cfg.retransmit_max_datagrams_per_feedback);
+            write_log_line(files.log_fp, "INFO", buf);
+        }
+        if (cfg.drop_enabled || cfg.drop_seed_set) {
+            snprintf(buf, sizeof(buf),
+                     "random_drop configured target=datagram drop_rate=%.6f drop_seed=%d drop_seed_set=%d",
+                     (double)cfg.drop_rate, cfg.drop_seed, cfg.drop_seed_set);
             write_log_line(files.log_fp, "INFO", buf);
         }
         if (cfg.fec_enabled || cfg.adaptive_fec_enabled) {
@@ -1651,6 +1694,12 @@ int main(int argc, char **argv) {
         if (cfg.drop_datagram_every > 0 && (data_attempt_index % (uint64_t)cfg.drop_datagram_every) == 0) {
             drop_this_datagram = 1;
         }
+        if (!drop_this_datagram && cfg.drop_enabled && cfg.drop_rate > 0.0f) {
+            float r = (float)rand() / ((float)RAND_MAX + 1.0f);
+            if (r < cfg.drop_rate) {
+                drop_this_datagram = 1;
+            }
+        }
 
         if (fec.enabled) {
             FecV1Header fec_header = {0};
@@ -1688,6 +1737,7 @@ int main(int argc, char **argv) {
 
         if (drop_this_datagram) {
             totals.dropped_datagrams++;
+            totals.dropped_frames += TX_FRAMES_PER_DATAGRAM;
         } else {
             ssize_t sent = sendto(sock, wire_to_send, wire_len, 0, (struct sockaddr *)&dest, sizeof(dest));
             if (sent < 0) {
