@@ -1,0 +1,1 @@
+trial_id,seq,packet_type,payload_len,rx_wall_ns,rx_mono_ns,payload_text,packet_hex,crc32,crc_ok,parse_error,port,baudrate
