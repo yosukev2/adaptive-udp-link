@@ -11,14 +11,14 @@ RX_CORE=${RX_CORE:-2}
 TX_CORE=${TX_CORE:-3}
 RETRANSMIT_BUFFER_DATAGRAMS=${RETRANSMIT_BUFFER_DATAGRAMS:-262144}
 RETRANSMIT_MAX_DATAGRAMS_PER_FEEDBACK=${RETRANSMIT_MAX_DATAGRAMS_PER_FEEDBACK:-4096}
-DATA_DIR=${DATA_DIR:-"data/w10/retransmit"}
-LOG_DIR=${LOG_DIR:-"logs/w10/retransmit"}
+DATA_DIR=${DATA_DIR:-"data/w09/retransmit"}
+LOG_DIR=${LOG_DIR:-"logs/w09/retransmit"}
 
 mkdir -p "$DATA_DIR" "$LOG_DIR"
 : > "$DATA_DIR/run_metadata.md"
 
 {
-  echo "# W10 retransmit comparison metadata"
+  echo "# W09 retransmit comparison metadata"
   echo
   echo "- date: $(date --iso-8601=seconds)"
   echo "- host: $(uname -a)"

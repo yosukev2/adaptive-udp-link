@@ -247,7 +247,7 @@ def write_report(rows: list[dict[str, object]], report: Path, summary_csv: Path,
     )
     usable_gain = int(xor["usable_datagrams"]) - int(off["usable_datagrams"])
 
-    lines: list[str] = ["# W10 random_drop + XOR FEC比較 summary", ""]
+    lines: list[str] = ["# W09 random_drop + XOR FEC比較 summary", ""]
     if metadata_path.exists():
         lines += ["## 実験条件", ""]
         for line in metadata_path.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -316,10 +316,10 @@ def write_report(rows: list[dict[str, object]], report: Path, summary_csv: Path,
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--log-dir", default="logs/w10/fec_comparison")
-    parser.add_argument("--metadata", default="data/w10/fec_comparison/run_metadata.md")
-    parser.add_argument("--summary-csv", default="data/w10/fec_comparison/fec_comparison.csv")
-    parser.add_argument("--report", default="reports/w10_fec_comparison_summary.md")
+    parser.add_argument("--log-dir", default="logs/w09/fec_comparison")
+    parser.add_argument("--metadata", default="data/w09/fec_comparison/run_metadata.md")
+    parser.add_argument("--summary-csv", default="data/w09/fec_comparison/fec_comparison.csv")
+    parser.add_argument("--report", default="reports/w09_fec_comparison_summary.md")
     args = parser.parse_args()
 
     log_dir = Path(args.log_dir)

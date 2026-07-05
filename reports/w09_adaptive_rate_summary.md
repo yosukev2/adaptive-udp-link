@@ -1,4 +1,4 @@
-# W10 adaptive rate comparison summary
+# W09 adaptive rate comparison summary
 
 ## 実験条件
 
@@ -70,38 +70,38 @@ ON は received rate だけ見ると少し良いが、rate_hz を大きく下げ
 
 missing rate は adaptive feedback window ごとの値。rate_hz は tx が次に使う送信 rate。
 
-![ON all trials](figures/w10_adaptive_on_all_trials_rate_missing.png)
+![ON all trials](figures/w09_adaptive_on_all_trials_rate_missing.png)
 
-![OFF all trials missing rate](figures/w10_adaptive_off_all_trials_missing_rate.png)
+![OFF all trials missing rate](figures/w09_adaptive_off_all_trials_missing_rate.png)
 
-![OFF/ON boxplot](figures/w10_adaptive_off_on_boxplot.png)
+![OFF/ON boxplot](figures/w09_adaptive_off_on_boxplot.png)
 
-![Missing rate histogram by feedback window](figures/w10_adaptive_missing_rate_histogram.png)
+![Missing rate histogram by feedback window](figures/w09_adaptive_missing_rate_histogram.png)
 
 missing rate histogram は trial単位ではなく、OFF/ON 各10試行の約1秒 feedback window をすべて含めた分布。
 
-![ON run1](figures/w10_adaptive_on_run1_missing_rate_rate_hz.png)
+![ON run1](figures/w09_adaptive_on_run1_missing_rate_rate_hz.png)
 
-![ON run2](figures/w10_adaptive_on_run2_missing_rate_rate_hz.png)
+![ON run2](figures/w09_adaptive_on_run2_missing_rate_rate_hz.png)
 
-![ON run3](figures/w10_adaptive_on_run3_missing_rate_rate_hz.png)
+![ON run3](figures/w09_adaptive_on_run3_missing_rate_rate_hz.png)
 
-![ON run4](figures/w10_adaptive_on_run4_missing_rate_rate_hz.png)
+![ON run4](figures/w09_adaptive_on_run4_missing_rate_rate_hz.png)
 
-![ON run5](figures/w10_adaptive_on_run5_missing_rate_rate_hz.png)
+![ON run5](figures/w09_adaptive_on_run5_missing_rate_rate_hz.png)
 
-![ON run6](figures/w10_adaptive_on_run6_missing_rate_rate_hz.png)
+![ON run6](figures/w09_adaptive_on_run6_missing_rate_rate_hz.png)
 
-![ON run7](figures/w10_adaptive_on_run7_missing_rate_rate_hz.png)
+![ON run7](figures/w09_adaptive_on_run7_missing_rate_rate_hz.png)
 
-![ON run8](figures/w10_adaptive_on_run8_missing_rate_rate_hz.png)
+![ON run8](figures/w09_adaptive_on_run8_missing_rate_rate_hz.png)
 
-![ON run9](figures/w10_adaptive_on_run9_missing_rate_rate_hz.png)
+![ON run9](figures/w09_adaptive_on_run9_missing_rate_rate_hz.png)
 
-![ON run10](figures/w10_adaptive_on_run10_missing_rate_rate_hz.png)
+![ON run10](figures/w09_adaptive_on_run10_missing_rate_rate_hz.png)
 
 ## 生成物
 
-- run summary CSV: `reports/w10_adaptive_rate_run_summary.csv`
-- report: `reports/w10_adaptive_rate_summary.md`
-- figures: `reports/figures/w10_adaptive_on_*.png`, `reports/figures/w10_adaptive_off_on_boxplot.png`, `reports/figures/w10_adaptive_missing_rate_histogram.png`, `reports/figures/w10_adaptive_off_all_trials_missing_rate.png`
+- run summary CSV: `reports/w09_adaptive_rate_run_summary.csv`
+- report: `reports/w09_adaptive_rate_summary.md`
+- figures: `reports/figures/w09_adaptive_on_*.png`, `reports/figures/w09_adaptive_off_on_boxplot.png`, `reports/figures/w09_adaptive_missing_rate_histogram.png`, `reports/figures/w09_adaptive_off_all_trials_missing_rate.png`

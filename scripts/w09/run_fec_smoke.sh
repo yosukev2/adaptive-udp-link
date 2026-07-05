@@ -6,7 +6,7 @@ cd "$ROOT_DIR"
 
 make -j4
 
-OUT_DIR=${OUT_DIR:-/tmp/w10_fec_smoke}
+OUT_DIR=${OUT_DIR:-/tmp/w09_fec_smoke}
 rm -rf "$OUT_DIR"
 mkdir -p "$OUT_DIR"
 
@@ -60,4 +60,4 @@ grep -q "fec_raw_missing_frames=60 recovered_by_fec_count=60" "$OUT_DIR/fec_xor_
 grep -q "fec_effective_missing_total=0" "$OUT_DIR/fec_xor_drop4_rx.log"
 grep -q "fec_raw_missing_frames=120 recovered_by_fec_count=0 unrecovered_by_fec_count=120" "$OUT_DIR/fec_xor_drop2_rx.log"
 
-echo "PASS: W10 FEC smoke"
+echo "PASS: W09 FEC smoke"

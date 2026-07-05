@@ -1,4 +1,4 @@
-# W10 random_drop + XOR FEC比較 summary
+# W09 random_drop + XOR FEC比較 summary
 
 ## 実験条件
 
@@ -91,8 +91,8 @@
 
 ## 生成物
 
-- rate_hz=1200 summary CSV: `data/w10/fec_comparison/fec_comparison.csv`
-- rate_hz=1200 metadata: `data/w10/fec_comparison/run_metadata.md`
-- rate_hz=120000 summary CSV: `data/w10/fec_comparison_rate_120000/fec_comparison.csv`
-- rate_hz=120000 metadata: `data/w10/fec_comparison_rate_120000/run_metadata.md`
-- Pi5 raw logs: `logs/w10/fec_comparison*`（PRには容量を抑えるためsummary CSVとmetadataを収録）
+- rate_hz=1200 summary CSV: `data/w09/fec_comparison/fec_comparison.csv`
+- rate_hz=1200 metadata: `data/w09/fec_comparison/run_metadata.md`
+- rate_hz=120000 summary CSV: `data/w09/fec_comparison_rate_120000/fec_comparison.csv`
+- rate_hz=120000 metadata: `data/w09/fec_comparison_rate_120000/run_metadata.md`
+- Pi5 raw logs: `logs/w09/fec_comparison*`（PRには容量を抑えるためsummary CSVとmetadataを収録）

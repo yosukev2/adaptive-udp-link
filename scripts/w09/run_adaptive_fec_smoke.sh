@@ -6,7 +6,7 @@ cd "$ROOT_DIR"
 
 make -j4
 
-OUT_DIR=${OUT_DIR:-/tmp/w10_adaptive_fec_smoke}
+OUT_DIR=${OUT_DIR:-/tmp/w09_adaptive_fec_smoke}
 RATE_HZ=${RATE_HZ:-1200}
 TX_DURATION_SEC=${TX_DURATION_SEC:-10}
 RX_DURATION_SEC=${RX_DURATION_SEC:-12}
@@ -27,7 +27,7 @@ rx_1sec="$OUT_DIR/rx_1sec.csv"
 rx_by_1recv="$OUT_DIR/rx_by_1recv.csv"
 
 {
-  echo "# W10 adaptive FEC smoke metadata"
+  echo "# W09 adaptive FEC smoke metadata"
   echo "- date: $(date --iso-8601=seconds)"
   echo "- branch: $(git branch --show-current 2>/dev/null || echo unknown)"
   echo "- commit: $(git rev-parse HEAD 2>/dev/null || echo unknown)"
@@ -96,4 +96,4 @@ grep -q "disable_fec" "$adaptive_log"
 grep -q "hold" "$adaptive_log"
 grep -q "old_fec_mode" "$adaptive_log"
 
-echo "PASS: W10 adaptive FEC smoke"
+echo "PASS: W09 adaptive FEC smoke"
