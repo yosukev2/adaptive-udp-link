@@ -1,4 +1,4 @@
-# W10 adaptive FEC policy
+# W09 adaptive FEC policy
 
 対象Issue: #161
 親Issue: #149

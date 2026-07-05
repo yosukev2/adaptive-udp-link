@@ -6,7 +6,7 @@ cd "$ROOT_DIR"
 
 make -j4
 
-OUT_DIR=${OUT_DIR:-/tmp/w10_random_drop_smoke}
+OUT_DIR=${OUT_DIR:-/tmp/w09_random_drop_smoke}
 rm -rf "$OUT_DIR"
 mkdir -p "$OUT_DIR"
 
@@ -73,4 +73,4 @@ if [ "${drop20_gap:-0}" -le 0 ]; then
   exit 1
 fi
 
-echo "PASS: W10 random drop smoke"
+echo "PASS: W09 random drop smoke"

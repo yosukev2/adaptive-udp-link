@@ -13,14 +13,14 @@ ADAPTIVE_MIN_RATE_HZ=${ADAPTIVE_MIN_RATE_HZ:-1000}
 ADAPTIVE_MAX_RATE_HZ=${ADAPTIVE_MAX_RATE_HZ:-500000}
 ADAPTIVE_HIGH_LATENCY_MS=${ADAPTIVE_HIGH_LATENCY_MS:-0}
 
-DATA_DIR=${DATA_DIR:-"data/w10/adaptive_rate"}
-LOG_DIR=${LOG_DIR:-"logs/w10/adaptive_rate"}
+DATA_DIR=${DATA_DIR:-"data/w09/adaptive_rate"}
+LOG_DIR=${LOG_DIR:-"logs/w09/adaptive_rate"}
 
 mkdir -p "$DATA_DIR" "$LOG_DIR"
 : > "$DATA_DIR/run_metadata.md"
 
 {
-  echo "# W10 adaptive rate comparison metadata"
+  echo "# W09 adaptive rate comparison metadata"
   echo
   echo "- date: $(date --iso-8601=seconds)"
   echo "- host: $(uname -a)"

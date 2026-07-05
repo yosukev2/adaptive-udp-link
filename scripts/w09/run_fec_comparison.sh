@@ -13,10 +13,10 @@ DATA_PORT=${DATA_PORT:-24001}
 TRIALS=${TRIALS:-"1 2 3 4 5 6 7 8 9 10"}
 RX_CORE=${RX_CORE:-2}
 TX_CORE=${TX_CORE:-3}
-DATA_DIR=${DATA_DIR:-"data/w10/fec_comparison"}
-LOG_DIR=${LOG_DIR:-"logs/w10/fec_comparison"}
+DATA_DIR=${DATA_DIR:-"data/w09/fec_comparison"}
+LOG_DIR=${LOG_DIR:-"logs/w09/fec_comparison"}
 SUMMARY_CSV=${SUMMARY_CSV:-"$DATA_DIR/fec_comparison.csv"}
-REPORT=${REPORT:-"reports/w10_fec_comparison_summary.md"}
+REPORT=${REPORT:-"reports/w09_fec_comparison_summary.md"}
 RX_BY_1RECV=${RX_BY_1RECV:-1}
 
 mkdir -p "$DATA_DIR" "$LOG_DIR"
@@ -25,7 +25,7 @@ mkdir -p "$DATA_DIR" "$LOG_DIR"
 make -j4
 
 {
-  echo "# W10 random_drop + XOR FEC comparison metadata"
+  echo "# W09 random_drop + XOR FEC comparison metadata"
   echo
   echo "- date: $(date --iso-8601=seconds)"
   echo "- host: $(uname -a)"
@@ -93,7 +93,7 @@ for mode in off xor; do
       echo "- time: $(date --iso-8601=seconds)"
       echo "- seed: $seed"
       echo "- run_dir: $run_dir"
-      echo "- rx_cmd: taskset -c $RX_CORE ./bin/rx --bind-ip 127.0.0.1 --port $DATA_PORT --duration-sec $RX_DURATION_SEC --log-path $rx_log --link-name w10_fec_comparison --trial $trial --fec-mode $mode --csv-in-1sec-log-path $rx_1sec${rx_by_1recv_cmd_suffix}"
+      echo "- rx_cmd: taskset -c $RX_CORE ./bin/rx --bind-ip 127.0.0.1 --port $DATA_PORT --duration-sec $RX_DURATION_SEC --log-path $rx_log --link-name w09_fec_comparison --trial $trial --fec-mode $mode --csv-in-1sec-log-path $rx_1sec${rx_by_1recv_cmd_suffix}"
       echo "- tx_cmd: taskset -c $TX_CORE ./bin/tx --dst-ip 127.0.0.1 --dst-port $DATA_PORT --rate-hz $RATE_HZ --duration-sec $TX_DURATION_SEC --log-path $tx_log --payload-len 48 --version 1 --fec-mode $mode --drop-rate $DROP_RATE --drop-seed $seed --drop-target datagram"
       echo
     } >> "$DATA_DIR/run_metadata.md"
@@ -103,7 +103,7 @@ for mode in off xor; do
       --port "$DATA_PORT" \
       --duration-sec "$RX_DURATION_SEC" \
       --log-path "$rx_log" \
-      --link-name w10_fec_comparison \
+      --link-name w09_fec_comparison \
       --trial "$trial" \
       --fec-mode "$mode" \
       --csv-in-1sec-log-path "$rx_1sec" \
@@ -153,7 +153,7 @@ done
 
 find "$DATA_DIR" -maxdepth 1 -type f -print | sort
 
-python3 scripts/analyze_w10_fec_comparison.py \
+python3 scripts/analyze_w09_fec_comparison.py \
   --log-dir "$LOG_DIR" \
   --metadata "$DATA_DIR/run_metadata.md" \
   --summary-csv "$SUMMARY_CSV" \

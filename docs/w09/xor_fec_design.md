@@ -1,4 +1,4 @@
-# W10 XOR FEC design
+# W09 XOR FEC design
 
 親Issue: #149
 対象Issue: #157 / #158 / #159 / #160

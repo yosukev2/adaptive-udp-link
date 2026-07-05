@@ -243,7 +243,7 @@ def write_report(rows: list[dict[str, object]], report: Path, summary_csv: Path,
     on = aggregate(rows, "on")
     reduction = (off["effective"] - on["effective"]) / off["effective"] if off["effective"] else 0.0
     lines: list[str] = []
-    lines += ["# W10 retransmit comparison summary", ""]
+    lines += ["# W09 retransmit comparison summary", ""]
     if data_dir and (data_dir / "run_metadata.md").exists():
         lines += ["## 実験条件", ""]
         for line in (data_dir / "run_metadata.md").read_text(encoding="utf-8", errors="replace").splitlines()[:20]:
@@ -287,8 +287,8 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir", default=None)
     parser.add_argument("--log-dir", default=None)
-    parser.add_argument("--summary-csv", default="reports/w10_retransmit_comparison.csv")
-    parser.add_argument("--report", default="reports/w10_retransmit_summary.md")
+    parser.add_argument("--summary-csv", default="reports/w09_retransmit_comparison.csv")
+    parser.add_argument("--report", default="reports/w09_retransmit_summary.md")
     args = parser.parse_args()
 
     data_dir = Path(args.data_dir) if args.data_dir else None
@@ -297,13 +297,13 @@ def main() -> int:
     elif args.log_dir:
         rows = collect_from_logs(Path(args.log_dir))
     else:
-        rows = collect_from_data(Path("data/w10/retransmit"))
-        data_dir = Path("data/w10/retransmit")
+        rows = collect_from_data(Path("data/w09/retransmit"))
+        data_dir = Path("data/w09/retransmit")
         if not rows:
             rows = collect_from_data(Path("data/retransmit"))
             data_dir = Path("data/retransmit")
         if not rows:
-            rows = collect_from_logs(Path("logs/w10/retransmit"))
+            rows = collect_from_logs(Path("logs/w09/retransmit"))
             data_dir = None
     if not rows:
         raise SystemExit("no retransmit run data found")

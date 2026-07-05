@@ -1,10 +1,10 @@
-# W10 retransmit comparison summary
+# W09 retransmit comparison summary
 
 ## 実験条件
 
 - date: 2026-07-04T20:15:52+09:00
 - host: Linux pi5 6.12.75+rpt-rpi-2712 #1 SMP PREEMPT Debian 1:6.12.75-1+rpt1 (2026-03-11) aarch64 GNU/Linux
-- branch: issue-173-w10-retransmit
+- branch: issue-173-w09-retransmit
 - commit: 3b8ac7dfc662212a436d96088a4d89441ce4f289
 - rate_hz: 120000
 - tx_duration_sec: 30
@@ -47,5 +47,5 @@
 
 ## 生成物
 
-- summary CSV: `reports/w10_retransmit_comparison.csv`
-- report: `reports/w10_retransmit_summary.md`
+- summary CSV: `reports/w09_retransmit_comparison.csv`
+- report: `reports/w09_retransmit_summary.md`

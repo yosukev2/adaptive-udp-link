@@ -1,4 +1,4 @@
-# W10 retransmit feedback design
+# W09 retransmit feedback design
 
 ## 目的
 

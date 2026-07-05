@@ -1,8 +1,8 @@
-# W10 missing改善 最終サマリー
+# W09 missing改善 最終サマリー
 
 ## 目的
 
-W10では、受信側の観測値に基づいて missing を改善する手段として、以下の3系統を実装・検証した。
+W09では、受信側の観測値に基づいて missing を改善する手段として、以下の3系統を実装・検証した。
 
 - adaptive rate制御: feedbackに基づいて `rate_hz` を下げる。
 - retransmit: feedbackに基づいて欠落範囲を再送する。
@@ -14,13 +14,13 @@ P99 latencyは補助指標として扱い、主成功指標は missing reduction
 
 | 分類 | 成果物 |
 |---|---|
-| feedback packet仕様 | `docs/w10/feedback_packet_format.md` |
-| adaptive rate summary | `reports/w10_adaptive_rate_summary.md` |
-| retransmit仕様 | `docs/w10/retransmit_design.md` |
-| retransmit summary | `reports/w10_retransmit_summary.md` |
-| XOR FEC仕様 | `docs/w10/xor_fec_design.md` |
-| adaptive FEC仕様 | `docs/w10/adaptive_fec_design.md` |
-| FEC ON/OFF比較summary | `reports/w10_fec_comparison_summary.md` |
+| feedback packet仕様 | `docs/w09/feedback_packet_format.md` |
+| adaptive rate summary | `reports/w09_adaptive_rate_summary.md` |
+| retransmit仕様 | `docs/w09/retransmit_design.md` |
+| retransmit summary | `reports/w09_retransmit_summary.md` |
+| XOR FEC仕様 | `docs/w09/xor_fec_design.md` |
+| adaptive FEC仕様 | `docs/w09/adaptive_fec_design.md` |
+| FEC ON/OFF比較summary | `reports/w09_fec_comparison_summary.md` |
 
 ## 方式別の結論
 
@@ -46,7 +46,7 @@ P99 latencyは補助指標として扱い、主成功指標は missing reduction
 - retransmitはeffective_missingを下げたが、今回のrunではON側のraw missingもOFFより小さかったため、改善の全てを再送だけの効果とは断定しない。また再送frameは元のTX timestampを持つため、latencyは大きく悪化する。
 - XOR FECはrandom_drop条件では安定してeffective_missingを下げたが、FEC ONでもunrecoveredは残る。k=4,r=1の範囲では、複数欠損やparity欠損は回復できない。
 
-## W10の結論
+## W09の結論
 
 - rate_hzを下げる制御だけでは、missingを安定的に下げつつfinal deliveredを最大化するには不十分だった。
 - 欠落を後から補う方針では、retransmitとFECのどちらもeffective_missingを下げられる。
