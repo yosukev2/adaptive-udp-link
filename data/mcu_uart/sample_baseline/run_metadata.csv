@@ -1,0 +1,2 @@
+trial_id,test_name,firmware_version,baudrate,packet_count,payload_len,port,dry_run,hardware_observed,baseline_status,created_wall_ns
+sample_baseline,m0_baseline_10pkt,unknown,115200,10,16,,true,false,template_only,1783249642546201800

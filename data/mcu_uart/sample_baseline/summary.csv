@@ -1,0 +1,2 @@
+trial_id,test_name,firmware_version,baudrate,packet_count_configured,payload_len_configured,sent_count,pc_received_count,mcu_received_count,received_count,exact_match_count,crc_error_count,seq_gap_count,duplicate_count,overflow_count,buffer_miss_count,recovered_count,unrecovered_count,safe_enter_count,reset_count,final_state,last_error_code,hardware_observed,baseline_status,pass_fail,note
+sample_baseline,m0_baseline_10pkt,unknown,115200,10,16,10,0,0,0,0,0,0,0,0,0,0,0,0,0,NO_MCU_TELEMETRY,,false,template_only,TEMPLATE_ONLY,dry-run only; no MCU hardware observed
