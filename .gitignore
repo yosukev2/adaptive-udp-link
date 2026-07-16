@@ -60,3 +60,73 @@ build/
 firmware/**/build*/
 logs/*.log
 logs/run_*/
+
+# Embedded firmware images
+firmware/**/*.bin
+firmware/**/*.uf2
+
+# Coverage files
+*.gcda
+*.gcno
+*.gcov
+coverage/
+htmlcov/
+.coverage
+.coverage.*
+
+# CMake / CTest generated files
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+compile_commands.json
+Testing/
+_deps/
+
+# Python caches, virtual environments, and tool state
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.venv/
+venv/
+env/
+
+# Editor and operating-system files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Local environment and scratch data
+.env
+.env.local
+/.worktrees/
+/tmp/
+*.tmp
+
+# External SDKs must be referenced through PICO_SDK_PATH /
+# FREERTOS_KERNEL_PATH rather than vendored into this repository.
+/pico-sdk/
+/FreeRTOS-Kernel/
+
+# MCU UART / W08 / W09 local run logs.
+# Curated evidence belongs under data/ or reports/.
+/logs/mcu_uart/*/
+!/logs/mcu_uart/.gitkeep
+/logs/w08/
+/logs/w09/
+
+# Extensionless host-test executable
+/firmware/mcu_uart_link/test_mcu_uart_protocol
+
+# Local detailed textbook (generated, intentionally untracked)
+/bin/adaptive_udp_link_textbook/
