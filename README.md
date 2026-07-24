@@ -37,27 +37,36 @@ feedback packet を軸に adaptive rate・retransmit・XOR FEC を実装し、�
 
 ## 実験成果の詳細
 
-| フェーズ | 検証した問い | 結果 | 設計への反映 |
-|---|---|---|---|
-| W04 再現性 | 同じ条件で p99 を再現できるか | 3 trial の p99 を自動比較し、平均から ±15% 以内を `reproducible=yes` と判定 | 指標・percentile 算出・ログ形式を固定し、以後の比較の土台を作成 |
-| W05 FSM | 短い一時停止と長い outage を区別できるか | 0.5/1 s は誤検知せず、3 s では `Normal → Degraded → Recover → Normal` を検出 | 2-window FSM を採用し、timeout-only より状態遷移を明示 |
-| W06 jitter | Linux と Pico でスケジューリング揺らぎは異なるか | 実機 CSV を取得し、P50/P95/P99/max を同じ解析スクリプトで比較 | ホスト性能だけでなく MCU の周期イベントを別軸で評価 |
-| W07 RTOS | RX workload が周期 TX を遅延させるか | FreeRTOS の TX jitter P95/P99 は bare-metal 比 1,839 µs削減、queue P95 8 µs | TX=3、STATE=2、RX=1 の優先度設計と `xTaskDelayUntil()` を採用 |
-| W08 rate sweep | 送信レート上昇時、遅延と欠落はどう変わるか | 120 kHz まで欠落なし、140 kHz から gap、500 kHz で missing 2.37%、P99 0.410 ms | レート上限を latency だけでなく missing と queue backlog で判断 |
-| W08 socket buffer | queue 容量を増やせば欠落を減らせるか | buffer 増加で drop は減る一方、蓄積待ちにより p95/p99/max が増える条件を確認 | 「欠落最小」と「tail latency 最小」のトレードオフを明示 |
-| W08 CPU affinity | TX/RX を別 core に固定すると tail outlier は消えるか | 低〜中レートでは末尾外れ値の原因切り分けに有効、高レートでは飽和が支配的 | affinity は万能な高速化ではなく、再現性向上と原因分離の手段に限定 |
-| W09 adaptive rate | feedback で rate を下げれば missing を抑えられるか | missing は 2.8919%→2.7661% と小幅改善。ただし受信総量は約54% | 輻輳時の退避機構として位置付け、通常時の最大 throughput には使わない |
-| W09 retransmit | 欠落範囲を後から埋められるか | effective missing 45.7%削減、54,801 frame 回復。平均 latency は 0.750→10.003 ms | bounded buffer と要求範囲を設け、鮮度より完全性を優先する用途に適用 |
-| W09 XOR FEC | ランダム単発 drop を前方冗長で救えるか | drop 10%・同一 seed で effective missing 約73%削減、120 kHz で usable +875,299 | k=4,r=1 を単発欠落向けの低コスト構成として評価。複数欠落は次の課題 |
+実験は、機能を追加するたびに「観測できるか」「限界を説明できるか」「壊れた時に回復できるか」を順に検証する流れで進めました。
 
-### 実験から得た重要な示唆
+### 1. まず、比較の土台を作る
 
-- **平均値だけでは限界を見誤る。** missing、p99/max、head/tail、CPU、queue backlog を同時に記録して初めて、飽和と一時的なスケジューリング遅延を区別できました。
-- **制御方式には適用範囲がある。** rate down は輻輳回避、retransmit は履歴に残る欠落、FEC はランダム欠落に強く、同じ指標でも原因によって最適解が変わります。
-- **改善には必ずコストがある。** FEC は parity 待ち、retransmit は古い timestamp による latency 増加、socket buffer は tail latency 増加を伴います。README の数値は改善率だけでなく、このトレードオフまで含めた結果です。
+最初に loopback の送受信ログへ sequence gap、CRC、P50/P95/P99、CPU 使用率を記録する共通フォーマットを導入しました。3 trial の p99 が平均の ±15% 以内かを自動判定し、単発の良い値ではなく再現性のある分布で議論できるようにしました。短い停止と長い停止も別シナリオで測り、0.5/1 秒では誤検知せず、3 秒では `Normal → Degraded → Recover → Normal` を検出する 2-window FSM を確立しました。
 
-![CPU affinity による tail latency の比較](reports/figures/w08_cpu_affinity_rate_500000_rxpin_x_txpin_max_latency_ms_avg.png)
-![FreeRTOS queue latency](reports/figures/w07_freertos_queue_latency_distribution.svg)
+### 2. 次に、どこから壊れるかを特定する
+
+Linux のレート掃引では 120 kHz まで欠落なし、140 kHz から gap、500 kHz では missing 2.37%、P99 0.410 ms となりました。socket buffer と CPU affinity も振り、drop を減らす設定が queue backlog と tail latency を増やす場合や、core 分離が原因切り分けには効いても飽和そのものは解消しないことを確認しました。レート上限を平均 latency ではなく missing・p99/max・queue backlog の組み合わせで決められるようになりました。
+
+![送信レートと欠落の関係](reports/figures/w08_socket_buffer_highrate_default_sndbuf_rxbuf_x_rate_missing_delta_total_avg.png)
+
+### 3. 組み込みで、周期処理を守る方法を検証する
+
+同じ RX workload を Pico の bare-metal と FreeRTOS で実行しました。FreeRTOS の優先度 `TX=3, STATE=2, RX=1` と `xTaskDelayUntil()` により、TX イベントの P95/P99 jitter は 1,839 µs から 0 µs、queue hand-off の P95 は 8 µs、deadline miss は 0 件でした。これは RTOS が常に速いという主張ではなく、重要な周期処理を低優先度 workload から隔離できることの実証です。
+
+![bare-metal jitter](reports/figures/w07_baremetal_abs_jitter_distribution.svg)
+![FreeRTOS jitter](reports/figures/w07_freertos_abs_jitter_distribution.svg)
+
+### 4. 最後に、欠落の種類ごとに回復方式を選ぶ
+
+限界を把握した後、feedback packet を追加し、同じ missing でも原因に応じて3方式を比較しました。
+
+- 輻輳への退避: adaptive rate は missing を 2.8919% から 2.7661% に下げましたが、受信総量は約54%に低下しました。
+- 履歴に残る欠落の回収: retransmit は effective missing を 45.7%削減し 54,801 frame を回復しました。一方、平均 latency は 0.750 ms から 10.003 ms に増えました。
+- ランダム単発 drop の回復: 同一 seed の drop 10% 条件で XOR FEC (k=4,r=1) は effective missing を約73%削減し、120 kHz で usable datagram を875,299件増やしました。parity 待ちと block 内複数欠落は残る制約です。
+
+![adaptive rate の OFF/ON 比較](reports/figures/w09_adaptive_off_on_boxplot.png)
+
+この流れから、rate down は輻輳、retransmit は完全性、FEC は単発欠落という役割分担を導きました。改善率だけでなく、latency・throughput・冗長量とのトレードオフまで測定した点が、この実験系列の結論です。
 ## 成果物と再現方法
 
 - 実験レポート: [`reports/`](reports/)、生データ: [`data/`](data/)
