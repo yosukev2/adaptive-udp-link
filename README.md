@@ -2,6 +2,50 @@
 
 UDP ベースの自己回復リンク基盤を段階的に実装しながら、観測・耐障害化・適応制御まで積み上げる C プロジェクトです。W04 では「同一条件での計測結果を再現できること」を重視し、`trial_summary`、1 秒統計、再現性チェック、CI を固定しています。
 
+## 面接向けサマリー：3つの成果
+
+このプロジェクトでは、**測る → 限界を特定する → 壊れても戻す**の順で UDP リンクを設計しました。数値は Raspberry Pi 5 loopback または Raspberry Pi Pico の独立試行です。
+
+### 1. 再現可能な計測基盤
+
+`trial_summary`、P50/P95/P99、seq gap、CRC、CPU 使用率を固定フォーマットで記録し、3 trial の P99 が平均の ±15% 以内かを自動判定するスクリプトと CI を整備しました。改善を単発の最良値ではなく分布として比較できます。
+
+### 2. 負荷限界とリアルタイム性の可視化
+
+送信レートを 50〜1,000,000 Hz で掃引し、**120,000 Hz までは欠落なし、140,000 Hz から gap、500,000 Hz では欠落率 2.37%・P99 0.410 ms** を確認しました。処理能力/socket queue の限界を超えると、latency より先に drop が現れます。
+
+![送信レートと欠落の関係](reports/figures/w08_socket_buffer_highrate_default_sndbuf_rxbuf_x_rate_missing_delta_total_avg.png)
+
+Pico では bare-metal と FreeRTOS を同一 workload で比較。優先度付き task 分離により TX イベントの P95/P99 jitter は **1,839 µs → 0 µs（100%削減）**、queue hand-off P95 は 8 µs、deadline miss は 0 件でした。RTOS が常に速いのではなく、周期処理を RX workload から隔離できた結果です。
+
+![bare-metal jitter](reports/figures/w07_baremetal_abs_jitter_distribution.svg)
+![FreeRTOS jitter](reports/figures/w07_freertos_abs_jitter_distribution.svg)
+
+### 3. 欠落原因に合わせた自己回復
+
+feedback packet を軸に adaptive rate・retransmit・XOR FEC を実装し、同一 seed / 複数 trial で比較しました。
+
+| 手段 | 実験結果 | 示唆 |
+|---|---:|---|
+| adaptive rate | missing 2.8919% → 2.7661% | 改善は小幅。受信総量は約54%に低下 |
+| retransmit | effective missing **45.7%削減**、54,801 frame 回復 | 有効だが平均 latency 0.750 → 10.003 ms |
+| XOR FEC (k=4,r=1) | random drop 10%で effective missing **約73%削減**、usable +875,299 (120 kHz) | 単発欠落に強いが parity 待ち・複数欠落は未回復 |
+
+![adaptive rate の OFF/ON 比較](reports/figures/w09_adaptive_off_on_boxplot.png)
+
+結論は単一の最適解ではなく、**輻輳には rate 制御、履歴に残る欠落には retransmit、ランダム単発欠落には FEC** と故障モードに応じて選択する設計です。
+
+## 成果物と再現方法
+
+- 実験レポート: [`reports/`](reports/)、生データ: [`data/`](data/)
+- プロトコル仕様: [`docs/protocol.md`](docs/protocol.md)、FEC: [`docs/w09/xor_fec_design.md`](docs/w09/xor_fec_design.md)
+- ビルド・テスト: `make all && make test`
+- レート掃引: `scripts/w08/run_send_interval_sweep.sh`
+- FEC 比較: `scripts/w09/run_fec_comparison.sh`
+
+以下は開発者向けの詳細な実行手順です。
+
+
 ## Repository Layout
 
 ```text
