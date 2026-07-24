@@ -35,6 +35,29 @@ feedback packet を軸に adaptive rate・retransmit・XOR FEC を実装し、�
 
 結論は単一の最適解ではなく、**輻輳には rate 制御、履歴に残る欠落には retransmit、ランダム単発欠落には FEC** と故障モードに応じて選択する設計です。
 
+## 実験成果の詳細
+
+| フェーズ | 検証した問い | 結果 | 設計への反映 |
+|---|---|---|---|
+| W04 再現性 | 同じ条件で p99 を再現できるか | 3 trial の p99 を自動比較し、平均から ±15% 以内を `reproducible=yes` と判定 | 指標・percentile 算出・ログ形式を固定し、以後の比較の土台を作成 |
+| W05 FSM | 短い一時停止と長い outage を区別できるか | 0.5/1 s は誤検知せず、3 s では `Normal → Degraded → Recover → Normal` を検出 | 2-window FSM を採用し、timeout-only より状態遷移を明示 |
+| W06 jitter | Linux と Pico でスケジューリング揺らぎは異なるか | 実機 CSV を取得し、P50/P95/P99/max を同じ解析スクリプトで比較 | ホスト性能だけでなく MCU の周期イベントを別軸で評価 |
+| W07 RTOS | RX workload が周期 TX を遅延させるか | FreeRTOS の TX jitter P95/P99 は bare-metal 比 1,839 µs削減、queue P95 8 µs | TX=3、STATE=2、RX=1 の優先度設計と `xTaskDelayUntil()` を採用 |
+| W08 rate sweep | 送信レート上昇時、遅延と欠落はどう変わるか | 120 kHz まで欠落なし、140 kHz から gap、500 kHz で missing 2.37%、P99 0.410 ms | レート上限を latency だけでなく missing と queue backlog で判断 |
+| W08 socket buffer | queue 容量を増やせば欠落を減らせるか | buffer 増加で drop は減る一方、蓄積待ちにより p95/p99/max が増える条件を確認 | 「欠落最小」と「tail latency 最小」のトレードオフを明示 |
+| W08 CPU affinity | TX/RX を別 core に固定すると tail outlier は消えるか | 低〜中レートでは末尾外れ値の原因切り分けに有効、高レートでは飽和が支配的 | affinity は万能な高速化ではなく、再現性向上と原因分離の手段に限定 |
+| W09 adaptive rate | feedback で rate を下げれば missing を抑えられるか | missing は 2.8919%→2.7661% と小幅改善。ただし受信総量は約54% | 輻輳時の退避機構として位置付け、通常時の最大 throughput には使わない |
+| W09 retransmit | 欠落範囲を後から埋められるか | effective missing 45.7%削減、54,801 frame 回復。平均 latency は 0.750→10.003 ms | bounded buffer と要求範囲を設け、鮮度より完全性を優先する用途に適用 |
+| W09 XOR FEC | ランダム単発 drop を前方冗長で救えるか | drop 10%・同一 seed で effective missing 約73%削減、120 kHz で usable +875,299 | k=4,r=1 を単発欠落向けの低コスト構成として評価。複数欠落は次の課題 |
+
+### 実験から得た重要な示唆
+
+- **平均値だけでは限界を見誤る。** missing、p99/max、head/tail、CPU、queue backlog を同時に記録して初めて、飽和と一時的なスケジューリング遅延を区別できました。
+- **制御方式には適用範囲がある。** rate down は輻輳回避、retransmit は履歴に残る欠落、FEC はランダム欠落に強く、同じ指標でも原因によって最適解が変わります。
+- **改善には必ずコストがある。** FEC は parity 待ち、retransmit は古い timestamp による latency 増加、socket buffer は tail latency 増加を伴います。README の数値は改善率だけでなく、このトレードオフまで含めた結果です。
+
+![CPU affinity による tail latency の比較](reports/figures/w08_cpu_affinity_rate_500000_rxpin_x_txpin_max_latency_ms_avg.png)
+![FreeRTOS queue latency](reports/figures/w07_freertos_queue_latency_distribution.svg)
 ## 成果物と再現方法
 
 - 実験レポート: [`reports/`](reports/)、生データ: [`data/`](data/)
