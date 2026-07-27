@@ -42,6 +42,8 @@ UDP ベースの自己回復リンク基盤を段階的に実装しながら、�
 
 **実験方法**：Pi 5 loopbackで複数trialを実行し、再現性、outage、送信レート、socket buffer、CPU affinityを比較する。
 
+まず正常時の再現性を確認し、次に障害・負荷・処理資源の影響を順に切り分け、最後に欠落への回復策を評価する。
+
 **結果のまとめ**：120,000 Hzまでは欠落なし。3秒outageではFSMが復旧状態まで検出。bufferやaffinityはdrop・tail latency・再現性に影響した。
 
 #### 2-1. 再現性評価
