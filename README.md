@@ -25,11 +25,11 @@ UDP ベースの自己回復リンク基盤を段階的に実装しながら、�
 
 ### 1. 再現可能な計測基盤と障害検知FSM
 
-`trial_summary`、P50/P95/P99、seq gap、CRC、CPU 使用率を固定フォーマットで記録し、3 trial の P99 が平均の ±15% 以内かを自動判定するスクリプトと CI を整備しました。改善を単発の最良値ではなく分布として比較できます。
+UDPリンクの改善を評価するには、まず「何が起きたか」を同じ尺度で記録する必要があります。そこで `trial_summary` に P50/P95/P99、seq gap、CRC、CPU 使用率を固定し、3 trial の P99 が平均の ±15% 以内かを自動判定するスクリプトと CI を整備しました。さらに outage を 0.5/1/3 秒で再現し、短い揺らぎは無視し、3 秒停止だけを `Normal → Degraded → Recover → Normal` と検出する2-window FSMを実装しました。結果として、性能改善と障害検知を同じログから再現可能に比較できる基盤を作りました。
 
 ### 2. Bare-metal/FreeRTOSのリアルタイム性とUDP負荷限界
 
-送信レートを 50〜1,000,000 Hz で掃引し、**120,000 Hz までは欠落なし、140,000 Hz から gap、500,000 Hz では欠落率 2.37%・P99 0.410 ms** を確認しました。処理能力/socket queue の限界を超えると、latency より先に drop が現れます。
+Linux loopbackで送信レートを 50〜1,000,000 Hz、socket buffer、CPU affinity の組み合わせで掃引しました。**120,000 Hz までは欠落なし、140,000 Hz から gap、500,000 Hz では欠落率 2.37%・P99 0.410 ms** となり、処理能力/socket queue の限界を超えると latency の連続的な悪化より先に drop が現れることを確認しました。これにより、レート上限を平均値だけで決めず、missing・p99/max・queue backlog の境界として設計できるようにしました。
 
 ![送信レートと欠落の関係](reports/figures/w08_socket_buffer_highrate_default_sndbuf_rxbuf_x_rate_missing_delta_total_avg.png)
 
@@ -40,7 +40,7 @@ Pico では bare-metal と FreeRTOS を同一 workload で比較。優先度付�
 
 ### 3. Feedbackベース自己回復（Adaptive Rate・再送・XOR FEC）
 
-feedback packet を軸に adaptive rate・retransmit・XOR FEC を実装し、同一 seed / 複数 trial で比較しました。
+欠落を検出するだけでなく回復させるため、feedback packet、bounded retransmit buffer、XOR parity を実装しました。同一 seed / 複数 trial で ON/OFF を比較し、missing rateだけでなく effective missing、usable datagram、latencyまで評価しました。
 
 | 手段 | 実験結果 | 示唆 |
 |---|---:|---|
