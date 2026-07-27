@@ -27,16 +27,24 @@ UDP ベースの自己回復リンク基盤を段階的に実装しながら、�
 
 UDPリンクの改善を評価するには、まず「何が起きたか」を同じ尺度で記録する必要があります。そこで `trial_summary` に P50/P95/P99、seq gap、CRC、CPU 使用率を固定し、3 trial の P99 が平均の ±15% 以内かを自動判定するスクリプトと CI を整備しました。さらに outage を 0.5/1/3 秒で再現し、短い揺らぎは無視し、3 秒停止だけを `Normal → Degraded → Recover → Normal` と検出する2-window FSMを実装しました。結果として、性能改善と障害検知を同じログから再現可能に比較できる基盤を作りました。
 
+関連データ: [W04 reproducibility](logs/reproducibility/w04_baseline_20260429/reproducibility_check.csv)、[W05 FSM compare](logs/fsm_recovery/w05_compare_baseline/compare_summary.csv)。さらにLinuxとPicoのjitterを同じpercentile規則で比較するため、[W06 report](reports/w06_jitter_summary.md) と [W06 raw data](data/w06/jitter_comparison.csv) を整備しました。
+
 ### 2. Bare-metal/FreeRTOSのリアルタイム性とUDP負荷限界
 
 Linux loopbackで送信レートを 50〜1,000,000 Hz、socket buffer、CPU affinity の組み合わせで掃引しました。**120,000 Hz までは欠落なし、140,000 Hz から gap、500,000 Hz では欠落率 2.37%・P99 0.410 ms** となり、処理能力/socket queue の限界を超えると latency の連続的な悪化より先に drop が現れることを確認しました。これにより、レート上限を平均値だけで決めず、missing・p99/max・queue backlog の境界として設計できるようにしました。
 
 ![送信レートと欠落の関係](reports/figures/w08_socket_buffer_highrate_default_sndbuf_rxbuf_x_rate_missing_delta_total_avg.png)
 
+関連データ: [W08 rate sweep summary](reports/w08_send_interval_summary.md)、[summary CSV](data/w08/send_interval/w08_send_interval_summary.csv)。50〜1,000,000 Hzを各3 trialで測定し、sample数、実効受信rate、missing、CPU、mean/p95/p99/max latencyを集計しました。socket buffer/CPU affinityの比較結果は [W08 socket buffer](reports/w08_socket_buffer_highrate_summary.md) と [W08 CPU affinity](reports/w08_cpu_affinity_matrix_summary.md) にまとめています。
+
 Pico では bare-metal と FreeRTOS を同一 workload で比較。優先度付き task 分離により TX イベントの P95/P99 jitter は **1,839 µs → 0 µs（100%削減）**、queue hand-off P95 は 8 µs、deadline miss は 0 件でした。RTOS が常に速いのではなく、周期処理を RX workload から隔離できた結果です。
 
 ![bare-metal jitter](reports/figures/w07_baremetal_abs_jitter_distribution.svg)
 ![FreeRTOS jitter](reports/figures/w07_freertos_abs_jitter_distribution.svg)
+
+![bare-metal / FreeRTOS jitter比較](reports/figures/readme_rtos_jitter.png)
+
+関連データ: [W07 report](reports/w07_rtos_jitter_summary.md)、[summary CSV](data/w07/w07_jitter_summary.csv)。Picoで各モード3 run、各999 intervalを取得し、jitter分布、queue latency、deadline miss、queue send failureまで集計しました。実装は [FreeRTOS firmware](firmware/w07_rtos_jitter/) と [task architecture](docs/w07_task_architecture.md) に記録しています。
 
 ### 3. Feedbackベース自己回復（Adaptive Rate・再送・XOR FEC）
 
@@ -49,6 +57,11 @@ Pico では bare-metal と FreeRTOS を同一 workload で比較。優先度付�
 | XOR FEC (k=4,r=1) | random drop 10%で effective missing **約73%削減**、usable +875,299 (120 kHz) | 単発欠落に強いが parity 待ち・複数欠落は未回復 |
 
 ![adaptive rate の OFF/ON 比較](reports/figures/w09_adaptive_off_on_boxplot.png)
+
+![FSMによる障害検知](reports/figures/readme_fsm_recovery.png)
+![XOR FECの欠落回復効果](reports/figures/readme_fec_effect.png)
+
+関連データ: [W05 FSM比較](logs/fsm_recovery/w05_compare_baseline/interpretation.md)、[adaptive rate](reports/w09_adaptive_rate_summary.md)、[retransmit](reports/w09_retransmit_summary.md)、[FEC比較](reports/w09_fec_comparison_summary.md)。W09では各方式を単なる実装確認で終わらせず、ON/OFF、同一drop seed、複数trialで raw missing / recovered / effective missing / usable datagram / latency を比較しました。raw CSVは [FEC 1200 Hz](data/w09/fec_comparison/fec_comparison.csv) と [FEC 120 kHz](data/w09/fec_comparison_rate_120000/fec_comparison.csv) で確認できます。
 
 結論は単一の最適解ではなく、**輻輳には rate 制御、履歴に残る欠落には retransmit、ランダム単発欠落には FEC** と故障モードに応じて選択する設計です。
 
