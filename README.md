@@ -13,6 +13,7 @@ UDP ベースの自己回復リンク基盤を段階的に実装しながら、�
   - [リアルタイムOSで周期処理を守る](#3-リアルタイムosで周期処理を守る)
 
 - [成果物と再現方法](#成果物と再現方法)
+- [開発・実験コマンド](#開発実験コマンド)
 - [Repository Layout](#repository-layout)
 - [Prerequisites](#prerequisites)
 - [Build And Test](#build-and-test)
@@ -89,7 +90,9 @@ adaptive-udp-link/
 - `make`
 - `bash`
 
-## Build And Test
+## 開発・実験コマンド
+
+### Build And Test
 
 ```bash
 make all
@@ -101,7 +104,7 @@ make test
 - `bin/test_framer`
 - `bash scripts/test_loopback_metrics.sh`
 
-## Quick Loopback Run
+### Quick Loopback Run
 
 10 秒だけローカル loopback で試す場合:
 
@@ -118,7 +121,7 @@ make run10
 
 `rx_in_1sec.csv` では 1 秒ごとに `pps` と `cpu_pct` を確認できます。`pps` は UDP datagram/s、`cpu_pct` はその 1 秒窓での process CPU usage です。
 
-## Reproducibility Check
+### Reproducibility Check
 
 W04 の標準手順はこのスクリプトです。
 
@@ -142,7 +145,7 @@ RATE_HZ=120 DURATION_SEC=5 PAYLOAD_LEN=64 LINK_NAME=host_loopback \
 RESULT_DIR=logs/reproducibility/custom_run bash scripts/run_reproducibility_check.sh
 ```
 
-## W05 Recovery Matrix
+### W05 Recovery Matrix
 
 W05 の標準手順はこのスクリプトです。
 
@@ -178,7 +181,7 @@ bash scripts/run_fsm_recovery_check.sh
 
 各 run は `scenario_<duration>/trial_<n>/` にまとまり、`rx.log`、`tx.log`、`state.csv` を残します。現行の 2-window FSM では `0.5s` と `1s` の outage は `Degraded` 閾値を跨がないため、`degraded_detect_ms` と `recover_complete_ms` は `na` になります。`3s` シナリオでは `Normal -> Degraded -> Recover -> Normal` の 3 遷移を必須とし、期待した遷移パターンから外れた run はスクリプトが非 0 で終了します。
 
-## W05 FSM Vs Timeout Compare
+### W05 FSM Vs Timeout Compare
 
 最終比較はこのスクリプトで行います。
 
@@ -204,7 +207,7 @@ RESULT_DIR=logs/fsm_recovery/w05_compare_baseline bash scripts/run_fsm_vs_timeou
 
 比較 run も `mode_<name>/scenario_<duration>/trial_<n>/` にまとまり、`rx.log`、`tx.log`、`state.csv` を残します。`interpretation.md` には比較表と、短い outage が `na` になる理由、`fsm` と `timeout-only` の挙動差をまとめます。
 
-## How To Read P95 And P99
+### How To Read P95 And P99
 
 各 trial の `rx.log` 末尾に `trial_summary` が出ます。
 
@@ -226,13 +229,13 @@ column -s, -t < logs/reproducibility/w04_baseline_20260429/reproducibility_check
 - `p99_deviation_pct_from_mean`
 - `reproducible`
 
-## Reproducibility Criterion
+### Reproducibility Criterion
 
 W04 では、3 trial の `latency_p99_ms` それぞれについて `abs(trial_p99 - mean_p99) / mean_p99 * 100` を計算し、すべてが `+/-15%` 以内なら `reproducible=yes` と判定します。`interpretation.md` に結果と簡単な解釈を残します。
 
 変動がしきい値を超えた場合は、まず `avg_pps` と `avg_cpu_pct` のばらつきを確認してください。そこが大きい場合、フレーム処理より先にローカルのスケジューリングやバックグラウンド負荷を疑うべきです。
 
-## Protocol Notes
+### Protocol Notes
 
 固定列の意味は [docs/protocol.md](docs/protocol.md) を参照してください。W04 では以下を固定しています。
 
@@ -240,6 +243,6 @@ W04 では、3 trial の `latency_p99_ms` それぞれについて `abs(trial_p9
 - 1 秒統計の `pps / cpu_pct`
 - percentile の算出規則は nearest-rank
 
-## CI
+### CI
 
 GitHub Actions は [.github/workflows/ci.yml](.github/workflows/ci.yml) で `make all` と `make test` を `push` / `pull_request` ごとに実行します。
