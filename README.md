@@ -1,6 +1,28 @@
 # adaptive-udp-link
 
 UDP ベースの自己回復リンク基盤を段階的に実装しながら、観測・耐障害化・適応制御まで積み上げる C プロジェクトです。W04 では「同一条件での計測結果を再現できること」を重視し、`trial_summary`、1 秒統計、再現性チェック、CI を固定しています。
+## 目次
+
+- [プロジェクト概要と主要成果](#プロジェクト概要と主要成果)
+  - [再現可能な計測基盤](#1-再現可能な計測基盤)
+  - [負荷限界とリアルタイム性の可視化](#2-負荷限界とリアルタイム性の可視化)
+  - [欠落原因に合わせた自己回復](#3-欠落原因に合わせた自己回復)
+- [実験成果の詳細](#実験成果の詳細)
+  - [比較の土台を作る](#1-まず比較の土台を作る)
+  - [限界を特定する](#2-次にどこから壊れるかを特定する)
+  - [周期処理を守る方法を検証する](#3-組み込みで周期処理を守る方法を検証する)
+  - [欠落の種類ごとに回復方式を選ぶ](#4-最後に欠落の種類ごとに回復方式を選ぶ)
+- [成果物と再現方法](#成果物と再現方法)
+- [Repository Layout](#repository-layout)
+- [Prerequisites](#prerequisites)
+- [Build And Test](#build-and-test)
+- [Quick Loopback Run](#quick-loopback-run)
+- [Reproducibility Check](#reproducibility-check)
+- [W05 Recovery Matrix](#w05-recovery-matrix)
+- [W05 FSM Vs Timeout Compare](#w05-fsm-vs-timeout-compare)
+- [How To Read P95 And P99](#how-to-read-p95-and-p99)
+- [Protocol Notes](#protocol-notes)
+- [CI](#ci)
 
 ## プロジェクト概要と主要成果
 
