@@ -22,7 +22,7 @@ UDP ベースの自己回復リンク基盤を段階的に実装しながら、�
     - [Bare-metal周期処理](#3-1-bare-metal周期処理)
     - [FreeRTOS task分離](#3-2-freertos-task分離)
     - [FreeRTOS queue hand-off](#3-3-freertos-queue-hand-off)
-    - [LinuxとPicoの周期jitter比較](#3-4-linuxとpicoの周期jitter比較)
+    - [Linuxを比較基準にしたPico周期jitter評価](#3-4-linuxを比較基準にしたpico周期jitter評価)
 - [成果物と再現方法](#成果物と再現方法)
 - [開発・実験コマンド](#開発実験コマンド)
   - [Build And Test](#build-and-test)
@@ -150,7 +150,7 @@ UDP ベースの自己回復リンク基盤を段階的に実装しながら、�
 
 ### 3. PicoでのBare-metal / FreeRTOSリアルタイム性評価
 
-**目的**：周期TX処理をRX workloadから保護する設計と、task間通信のコストを検証する。
+**目的**：1章でPi 5–Pico間の通信観測系を作り、2章でPi 5側のUDP欠落・queue飽和・自己回復を確認した。3章では、その通信相手となるPico側が周期送信を安定して実行できるかを、Bare-metalとFreeRTOSで検証する。特に、RX処理やtask間通信がTX周期性へ与える影響を明らかにする。
 
 **実験方法**：Picoで同一RX workloadをBare-metalとFreeRTOSで各3回実行し、TX jitter、queue hand-off、deadline missを測定。Pi 5 Linux user-space loopとも比較する。
 
@@ -180,9 +180,9 @@ UDP ベースの自己回復リンク基盤を段階的に実装しながら、�
 
 ![FreeRTOS queue latency](reports/figures/w07_freertos_queue_latency_distribution.svg)
 
-#### 3-4. LinuxとPicoの周期jitter比較
+#### 3-4. Linuxを比較基準にしたPico周期jitter評価
 
-- **やったこと**：Pi 5 Linux user-space loopとPico hardware-timer loopを比較。
+- **やったこと**：Pi 5 Linux user-space loopを比較基準として、Pico hardware-timer loopの周期jitterを比較。
 - **現象**：LinuxのP99 jitterは5 µs、Picoは0 µs。最大値はLinux 55 µs、Pico 2 µs。
 - **示唆**：hardware timerは送信側のスケジューリングノイズを抑える基準として有効。
 
