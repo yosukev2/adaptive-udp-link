@@ -7,11 +7,11 @@ UDP ベースの自己回復リンク基盤を段階的に実装しながら、�
   - [観測・再現性](#1-観測再現性)
   - [リアルタイム性と性能限界](#2-リアルタイム性と性能限界)
   - [自己回復](#3-自己回復)
-- [実験の流れ](#実験の流れ)
+
   - [観測・再現性を確立する](#1-観測再現性を確立する)
   - [リアルタイム性と性能限界を測る](#2-リアルタイム性と性能限界を測る)
   - [リアルタイムOSで周期処理を守る](#3-リアルタイムosで周期処理を守る)
-  - [自己回復方式を比較する](#4-自己回復方式を比較する)
+
 - [成果物と再現方法](#成果物と再現方法)
 - [Repository Layout](#repository-layout)
 - [Prerequisites](#prerequisites)
@@ -28,11 +28,11 @@ UDP ベースの自己回復リンク基盤を段階的に実装しながら、�
 
 このプロジェクトでは、**測る → 限界を特定する → 壊れても戻す**の順で UDP リンクを設計しました。数値は Raspberry Pi 5 loopback または Raspberry Pi Pico の独立試行です。
 
-### 1. 観測・再現性
+### 1. 再現可能な計測基盤と障害検知FSM
 
 `trial_summary`、P50/P95/P99、seq gap、CRC、CPU 使用率を固定フォーマットで記録し、3 trial の P99 が平均の ±15% 以内かを自動判定するスクリプトと CI を整備しました。改善を単発の最良値ではなく分布として比較できます。
 
-### 2. リアルタイム性と性能限界
+### 2. Bare-metal/FreeRTOSのリアルタイム性とUDP負荷限界
 
 送信レートを 50〜1,000,000 Hz で掃引し、**120,000 Hz までは欠落なし、140,000 Hz から gap、500,000 Hz では欠落率 2.37%・P99 0.410 ms** を確認しました。処理能力/socket queue の限界を超えると、latency より先に drop が現れます。
 
@@ -43,7 +43,7 @@ Pico では bare-metal と FreeRTOS を同一 workload で比較。優先度付�
 ![bare-metal jitter](reports/figures/w07_baremetal_abs_jitter_distribution.svg)
 ![FreeRTOS jitter](reports/figures/w07_freertos_abs_jitter_distribution.svg)
 
-### 3. 自己回復
+### 3. Feedbackベース自己回復（Adaptive Rate・再送・XOR FEC）
 
 feedback packet を軸に adaptive rate・retransmit・XOR FEC を実装し、同一 seed / 複数 trial で比較しました。
 
@@ -57,38 +57,6 @@ feedback packet を軸に adaptive rate・retransmit・XOR FEC を実装し、�
 
 結論は単一の最適解ではなく、**輻輳には rate 制御、履歴に残る欠落には retransmit、ランダム単発欠落には FEC** と故障モードに応じて選択する設計です。
 
-## 実験の流れ
-
-実験は、機能を追加するたびに「観測できるか」「限界を説明できるか」「壊れた時に回復できるか」を順に検証する流れで進めました。
-
-### 1. 観測・再現性を確立する
-
-最初に loopback の送受信ログへ sequence gap、CRC、P50/P95/P99、CPU 使用率を記録する共通フォーマットを導入しました。3 trial の p99 が平均の ±15% 以内かを自動判定し、単発の良い値ではなく再現性のある分布で議論できるようにしました。短い停止と長い停止も別シナリオで測り、0.5/1 秒では誤検知せず、3 秒では `Normal → Degraded → Recover → Normal` を検出する 2-window FSM を確立しました。
-
-### 2. リアルタイム性と性能限界を測る
-
-Linux のレート掃引では 120 kHz まで欠落なし、140 kHz から gap、500 kHz では missing 2.37%、P99 0.410 ms となりました。socket buffer と CPU affinity も振り、drop を減らす設定が queue backlog と tail latency を増やす場合や、core 分離が原因切り分けには効いても飽和そのものは解消しないことを確認しました。レート上限を平均 latency ではなく missing・p99/max・queue backlog の組み合わせで決められるようになりました。
-
-![送信レートと欠落の関係](reports/figures/w08_socket_buffer_highrate_default_sndbuf_rxbuf_x_rate_missing_delta_total_avg.png)
-
-### 3. リアルタイムOSで周期処理を守る
-
-同じ RX workload を Pico の bare-metal と FreeRTOS で実行しました。FreeRTOS の優先度 `TX=3, STATE=2, RX=1` と `xTaskDelayUntil()` により、TX イベントの P95/P99 jitter は 1,839 µs から 0 µs、queue hand-off の P95 は 8 µs、deadline miss は 0 件でした。これは RTOS が常に速いという主張ではなく、重要な周期処理を低優先度 workload から隔離できることの実証です。
-
-![bare-metal jitter](reports/figures/w07_baremetal_abs_jitter_distribution.svg)
-![FreeRTOS jitter](reports/figures/w07_freertos_abs_jitter_distribution.svg)
-
-### 4. 自己回復方式を比較する
-
-限界を把握した後、feedback packet を追加し、同じ missing でも原因に応じて3方式を比較しました。
-
-- 輻輳への退避: adaptive rate は missing を 2.8919% から 2.7661% に下げましたが、受信総量は約54%に低下しました。
-- 履歴に残る欠落の回収: retransmit は effective missing を 45.7%削減し 54,801 frame を回復しました。一方、平均 latency は 0.750 ms から 10.003 ms に増えました。
-- ランダム単発 drop の回復: 同一 seed の drop 10% 条件で XOR FEC (k=4,r=1) は effective missing を約73%削減し、120 kHz で usable datagram を875,299件増やしました。parity 待ちと block 内複数欠落は残る制約です。
-
-![adaptive rate の OFF/ON 比較](reports/figures/w09_adaptive_off_on_boxplot.png)
-
-この流れから、rate down は輻輳、retransmit は完全性、FEC は単発欠落という役割分担を導きました。改善率だけでなく、latency・throughput・冗長量とのトレードオフまで測定した点が、この実験系列の結論です。
 ## 成果物と再現方法
 
 - 実験レポート: [`reports/`](reports/)、生データ: [`data/`](data/)
