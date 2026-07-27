@@ -5,34 +5,11 @@ UDP ベースの自己回復リンク基盤を段階的に実装しながら、�
 
 - [3つの主要成果](#3つの主要成果)
   - [Pi 5–Pico UART通信・telemetry評価](#1-pi-5pico-uart通信telemetry評価)
-    - [UART packet通信](#1-1-uart-packet通信)
-    - [MCU telemetryとsummary](#1-2-mcu-telemetryとsummary)
   - [Pi 5 loopbackでのUDP性能評価・障害検知・自己回復](#2-pi-5-loopbackでのudp性能評価障害検知自己回復)
-    - [再現性評価](#2-1-再現性評価)
-    - [障害検知FSMとtimeout-only比較](#2-2-障害検知fsmとtimeout-only比較)
-    - [送信レート sweep](#2-3-送信レート-sweep)
-    - [socket buffer比較](#2-4-socket-buffer比較)
-    - [CPU affinity比較](#2-5-cpu-affinity比較)
-    - [UDP自己回復機構](#2-6-udp自己回復機構)
-      - [Adaptive Rate](#2-6-1-adaptive-rate)
-      - [Retransmit](#2-6-2-retransmit)
-      - [XOR FEC](#2-6-3-xor-fec)
-      - [3方式の比較](#2-6-4-3方式の比較)
   - [PicoでのBare-metal / FreeRTOSリアルタイム性評価](#3-picoでのbare-metal--freertosリアルタイム性評価)
-    - [Bare-metal周期処理](#3-1-bare-metal周期処理)
-    - [FreeRTOS task分離](#3-2-freertos-task分離)
-    - [FreeRTOS queue hand-off](#3-3-freertos-queue-hand-off)
-    - [Linuxを比較基準にしたPico周期jitter評価](#3-4-linuxを比較基準にしたpico周期jitter評価)
+- [現時点の課題と次にやりたいこと](#現時点の課題と次にやりたいこと)
 - [成果物と再現方法](#成果物と再現方法)
 - [開発・実験コマンド](#開発実験コマンド)
-  - [Build And Test](#build-and-test)
-  - [Quick Loopback Run](#quick-loopback-run)
-  - [Reproducibility Check](#reproducibility-check)
-  - [W05 Recovery Matrix](#w05-recovery-matrix)
-  - [W05 FSM Vs Timeout Compare](#w05-fsm-vs-timeout-compare)
-  - [How To Read P95 And P99](#how-to-read-p95-and-p99)
-  - [Protocol Notes](#protocol-notes)
-  - [CI](#ci)
 - [Repository Layout](#repository-layout)
 - [Prerequisites](#prerequisites)
 ## 3つの主要成果
@@ -188,6 +165,25 @@ UDP ベースの自己回復リンク基盤を段階的に実装しながら、�
 
 ![Linux / Pico jitter比較](reports/figures/readme_rtos_jitter.png)
 
+## 現時点の課題と次にやりたいこと
+
+3つの実験で、ホスト内UDPの限界、欠落回復方式、Pico側の周期処理、Pi 5–Pico UART通信を個別に評価しました。一方で、以下はまだ検証範囲が限定されています。
+
+### 現時点の課題
+
+- **実ネットワークのend-to-end評価が未実施**：Pi 5 loopbackは物理NIC、スイッチ、無線、伝送路の揺らぎを含まないため、実ネットワークで同じ欠落率・tail latencyになるとは限らない。
+- **Pi 5–Pico間の統合評価が未完了**：UART通信とPico RTOSの評価系はあるが、Pi 5のUDP自己回復処理とPicoの実通信処理を一つのend-to-end経路として接続していない。
+- **FECの回復範囲**：`k=4, r=1`では同一block内の複数欠落やparity欠落を復元できない。
+- **再送の鮮度問題**：retransmitは欠落を回復できる一方、古いframeの後着でlatencyが増える。
+- **長時間・多環境の再現性**：今回の比較は主に3〜10 trialであり、長時間運転、異なる負荷、複数ボードでの評価はこれからである。
+
+### 次にやりたいこと
+
+1. **Pi 5–Pico end-to-end接続**：UARTまたは実ネットワーク経路で、Pi 5の送信・feedback・自己回復とPicoの受信・telemetryを接続し、通信全体のP99、missing、復旧時間を測る。
+2. **実ネットワークでの再検証**：有線・無線、遅延・loss・burst lossを注入し、loopbackで得た限界値との差分を測定する。
+3. **適応制御の統合**：missing率、queue backlog、latencyをfeedbackに集約し、rate制御・再送・FECを状況に応じて切り替える。
+4. **FECと再送の拡張**：複数parity、blockサイズ変更、burst lossへの対応を比較し、回復率と冗長量の最適点を探る。
+5. **リアルタイム経路の実測**：PicoのFreeRTOS task jitterだけでなく、実際のUDP/UART送受信、driver、buffer、queueを含むend-to-end latencyを測る。
 ## 成果物と再現方法
 
 - 実験レポート: [`reports/`](reports/)、生データ: [`data/`](data/)
