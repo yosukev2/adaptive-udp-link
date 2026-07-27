@@ -4,27 +4,21 @@ UDP ベースの自己回復リンク基盤を段階的に実装しながら、�
 ## 目次
 
 - [3つの主要成果](#3つの主要成果)
-  - [観測・再現性](#1-観測再現性)
-  - [リアルタイム性と性能限界](#2-リアルタイム性と性能限界)
-  - [自己回復](#3-自己回復)
-
-  - [観測・再現性を確立する](#1-観測再現性を確立する)
-  - [リアルタイム性と性能限界を測る](#2-リアルタイム性と性能限界を測る)
-  - [リアルタイムOSで周期処理を守る](#3-リアルタイムosで周期処理を守る)
-
+  - [再現可能な計測基盤と障害検知FSM](#1-再現可能な計測基盤と障害検知fsm)
+  - [Bare-metal/FreeRTOSのリアルタイム性とUDP負荷限界](#2-bare-metalfreertosのリアルタイム性とudp負荷限界)
+  - [Feedbackベース自己回復](#3-feedbackベース自己回復-adaptive-rate再送xor-fec)
 - [成果物と再現方法](#成果物と再現方法)
 - [開発・実験コマンド](#開発実験コマンド)
+  - [Build And Test](#build-and-test)
+  - [Quick Loopback Run](#quick-loopback-run)
+  - [Reproducibility Check](#reproducibility-check)
+  - [W05 Recovery Matrix](#w05-recovery-matrix)
+  - [W05 FSM Vs Timeout Compare](#w05-fsm-vs-timeout-compare)
+  - [How To Read P95 And P99](#how-to-read-p95-and-p99)
+  - [Protocol Notes](#protocol-notes)
+  - [CI](#ci)
 - [Repository Layout](#repository-layout)
 - [Prerequisites](#prerequisites)
-- [Build And Test](#build-and-test)
-- [Quick Loopback Run](#quick-loopback-run)
-- [Reproducibility Check](#reproducibility-check)
-- [W05 Recovery Matrix](#w05-recovery-matrix)
-- [W05 FSM Vs Timeout Compare](#w05-fsm-vs-timeout-compare)
-- [How To Read P95 And P99](#how-to-read-p95-and-p99)
-- [Protocol Notes](#protocol-notes)
-- [CI](#ci)
-
 ## 3つの主要成果
 
 このプロジェクトでは、**測る → 限界を特定する → 壊れても戻す**の順で UDP リンクを設計しました。数値は Raspberry Pi 5 loopback または Raspberry Pi Pico の独立試行です。
