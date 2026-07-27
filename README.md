@@ -61,7 +61,7 @@ UDP ベースの自己回復リンク基盤を段階的に実装しながら、�
 
 ### 2. Pi 5 loopbackでのUDP性能評価・障害検知・自己回復
 
-**目的**：再現可能な計測基盤を作り、障害検知とUDP処理の限界を定量化する。
+**目的**：物理ネットワークの揺らぎを除外したPi 5 loopbackで、UDP処理・socket queue・スケジューリングの限界を切り分け、再現可能な計測基盤と障害検知を確立する。loopbackの結果は実ネットワークの品質そのものではなく、ホスト内の処理能力を評価するbaselineとして扱う。
 
 **実験方法**：Pi 5 loopbackで複数trialを実行し、再現性、outage、送信レート、socket buffer、CPU affinityを比較する。
 
@@ -69,9 +69,9 @@ UDP ベースの自己回復リンク基盤を段階的に実装しながら、�
 
 #### 2-1. 再現性評価
 
-- **やったこと**：同一条件で3 trialを実行し、P50/P95/P99、pps、CPU使用率を比較。
-- **現象**：120 frame/s条件でP99平均0.360 ms、最大偏差6.94%、再現性判定 `yes`。
-- **示唆**：単発値ではなく、複数trialの分布で性能を評価できる。
+- **やったこと**：Pi 5 loopbackで送信レート120 frame/s、payload 64 bytes、送信5秒・受信7秒の条件を固定し、3 trialを実行。送受信数、sequence gap、CRC error、parse error、P50/P95/P99、pps、CPU使用率を比較。
+- **現象**：3 trialとも期待送信数600 frameに対するsequence gap、CRC error、parse errorは0件。P99平均は0.360 ms、最大偏差6.94%、再現性判定は `yes`。
+- **示唆**：この実験は負荷限界ではなく、エラーが発生しないbaseline条件で計測系の再現性を確認したもの。負荷限界とgap発生条件は2-3のrate sweepで別途検証した。
 
 関連データ: [W04再現性CSV](logs/reproducibility/w04_baseline_20260429/reproducibility_check.csv)
 
