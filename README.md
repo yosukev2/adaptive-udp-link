@@ -38,7 +38,7 @@ UDP ベースの自己回復リンク基盤を段階的に実装しながら、�
 
 ### 2. Pi 5 loopbackでのUDP性能評価・障害検知・自己回復
 
-**目的**：物理ネットワークの揺らぎを除外したPi 5 loopbackで、UDP処理・socket queue・スケジューリングの限界を切り分け、再現可能な計測基盤と障害検知を確立する。loopbackの結果は実ネットワークの品質そのものではなく、ホスト内の処理能力を評価するbaselineとして扱う。
+**目的**：1章で実機間通信の観測系を整えた後、物理ネットワークやMCU処理の影響を分離するため、Pi 5 loopbackでUDP処理・socket queue・スケジューリングの限界を切り分け、再現可能な計測基盤と障害検知を確立する。loopbackの結果は実ネットワークの品質そのものではなく、ホスト内の処理能力を評価するbaselineとして扱う。UART経路とloopbackを接続したend-to-end評価は次の課題とする。
 
 **実験方法**：Pi 5 loopbackで複数trialを実行し、再現性、outage、送信レート、socket buffer、CPU affinityを比較する。
 
