@@ -7,6 +7,7 @@ import csv
 from collections import defaultdict
 from pathlib import Path
 
+import japanize_matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -154,7 +155,7 @@ def generate_fsm_figure() -> None:
         fontweight="bold",
     )
     ax.set_title("FSM状態遷移 — 3秒outageの代表trial")
-    ax.set_xlabel("RX elapsed time (s)")
+    ax.set_xlabel("RX経過時間（秒）")
     ax.set_xlim(0, chart_end)
     ax.set_ylim(0.05, 1.08)
     ax.set_yticks([])
@@ -186,21 +187,21 @@ def generate_rtos_figure() -> None:
         x - width / 2,
         baremetal,
         width,
-        label="Bare-metal single loop",
+        label="Bare-metal単一loop",
         color=ORANGE,
     )
     rtos_bars = ax.bar(
         x + width / 2,
         freertos,
         width,
-        label="FreeRTOS task separation",
+        label="FreeRTOS task分離",
         color=BLUE,
     )
 
     ax.bar_label(bare_bars, labels=[f"{value:,.0f}" for value in baremetal], padding=4)
     ax.bar_label(rtos_bars, labels=[f"{value:,.0f}" for value in freertos], padding=4)
     ax.set_title("CPU負荷下におけるTXイベントのリリースジッタ")
-    ax.set_ylabel("Absolute jitter (µs), pooled across 3 runs")
+    ax.set_ylabel("絶対ジッタ（µs、3 run統合）")
     ax.set_xticks(x, metrics)
     ax.set_ylim(0, max(baremetal) * 1.22)
     ax.grid(axis="y", alpha=0.8)
@@ -280,12 +281,12 @@ def generate_fec_figure() -> None:
     x = np.arange(len(labels))
     width = 0.34
     fig, ax = plt.subplots(figsize=(9.4, 4.8))
-    off_bars = ax.bar(x - width / 2, off_values, width, label="FEC off", color=RED)
+    off_bars = ax.bar(x - width / 2, off_values, width, label="FECなし", color=RED)
     xor_bars = ax.bar(
         x + width / 2,
         xor_values,
         width,
-        label="XOR FEC (k=4, r=1)",
+        label="XOR FEC（k=4、r=1）",
         color=GREEN,
     )
     ax.bar_label(off_bars, labels=[f"{value:.2f}%" for value in off_values], padding=4)
@@ -313,7 +314,7 @@ def generate_fec_figure() -> None:
         )
 
     ax.set_title("再現可能なランダムdatagram 10%欠落に対するXOR FEC")
-    ax.set_ylabel("Effective missing rate")
+    ax.set_ylabel("実効missing率")
     ax.set_xticks(x, labels)
     ax.set_ylim(0, 14)
     ax.grid(axis="y", alpha=0.8)
