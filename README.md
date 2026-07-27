@@ -4,22 +4,25 @@ UDP ベースの自己回復リンク基盤を段階的に実装しながら、�
 ## 目次
 
 - [3つの主要成果](#3つの主要成果)
-  - [Pi 5 loopbackでのUDP性能評価](#1-pi-5-loopbackでのudp性能評価)
+  - [Pi 5 loopbackでのUDP性能評価・障害検知・自己回復](#1-pi-5-loopbackでのudp性能評価障害検知自己回復)
     - [再現性評価](#1-1-再現性評価)
     - [障害検知FSMとtimeout-only比較](#1-2-障害検知fsmとtimeout-only比較)
     - [送信レート sweep](#1-3-送信レート-sweep)
     - [socket buffer比較](#1-4-socket-buffer比較)
     - [CPU affinity比較](#1-5-cpu-affinity比較)
+    - [UDP自己回復機構](#1-6-udp自己回復機構)
+      - [Adaptive Rate](#1-6-1-adaptive-rate)
+      - [Retransmit](#1-6-2-retransmit)
+      - [XOR FEC](#1-6-3-xor-fec)
+      - [3方式の比較](#1-6-4-3方式の比較)
   - [PicoでのBare-metal / FreeRTOSリアルタイム性評価](#2-picoでのbare-metal--freertosリアルタイム性評価)
     - [Bare-metal周期処理](#2-1-bare-metal周期処理)
     - [FreeRTOS task分離](#2-2-freertos-task分離)
     - [FreeRTOS queue hand-off](#2-3-freertos-queue-hand-off)
     - [LinuxとPicoの周期jitter比較](#2-4-linuxとpicoの周期jitter比較)
-  - [Pi 5 loopbackでのUDP自己回復機構](#3-pi-5-loopbackでのudp自己回復機構)
-    - [Adaptive Rate](#3-1-adaptive-rate)
-    - [Retransmit](#3-2-retransmit)
-    - [XOR FEC](#3-3-xor-fec)
-    - [3方式の比較](#3-4-3方式の比較)
+  - [Pi 5–Pico UART通信・telemetry評価](#3-pi-5pico-uart通信telemetry評価)
+    - [UART packet通信](#3-1-uart-packet通信)
+    - [MCU telemetryとsummary](#3-2-mcu-telemetryとsummary)
 - [成果物と再現方法](#成果物と再現方法)
 - [開発・実験コマンド](#開発実験コマンド)
   - [Build And Test](#build-and-test)
@@ -34,7 +37,7 @@ UDP ベースの自己回復リンク基盤を段階的に実装しながら、�
 - [Prerequisites](#prerequisites)
 ## 3つの主要成果
 
-### 1. Pi 5 loopbackでのUDP性能評価
+### 1. Pi 5 loopbackでのUDP性能評価・障害検知・自己回復
 
 **目的**：再現可能な計測基盤を作り、障害検知とUDP処理の限界を定量化する。
 
@@ -122,7 +125,7 @@ UDP ベースの自己回復リンク基盤を段階的に実装しながら、�
 
 ![Linux / Pico jitter比較](reports/figures/readme_rtos_jitter.png)
 
-### 3. Pi 5 loopbackでのUDP自己回復機構
+#### 1-6. UDP自己回復機構
 
 **目的**：欠落原因ごとに回復方式を選び、missing削減とlatency・throughputのトレードオフを評価する。
 
@@ -130,7 +133,7 @@ UDP ベースの自己回復リンク基盤を段階的に実装しながら、�
 
 **結果のまとめ**：Adaptive Rateは小幅改善、Retransmitは欠落回復と引き換えにlatency増加、XOR FECはrandom dropに対して約73%のeffective missing削減を確認した。
 
-#### 3-1. Adaptive Rate
+##### 1-6-1. Adaptive Rate
 
 - **やったこと**：feedbackでmissingを検出し、送信rateを動的に下げる制御を実装。
 - **現象**：missingは2.8919%から2.7661%へ改善。一方、受信総量は約54%に低下。
@@ -138,7 +141,7 @@ UDP ベースの自己回復リンク基盤を段階的に実装しながら、�
 
 ![Adaptive Rate ON/OFF](reports/figures/w09_adaptive_off_on_boxplot.png)
 
-#### 3-2. Retransmit
+##### 1-6-2. Retransmit
 
 - **やったこと**：feedbackで欠落範囲を通知し、bounded bufferから再送。
 - **現象**：effective missingを45.7%削減し、54,801 frameを回復。平均latencyは0.750 msから10.003 msへ増加。
@@ -146,7 +149,7 @@ UDP ベースの自己回復リンク基盤を段階的に実装しながら、�
 
 ![Retransmit結果](reports/figures/w09_adaptive_off_on_boxplot.png)
 
-#### 3-3. XOR FEC
+##### 1-6-3. XOR FEC
 
 - **やったこと**：k=4、r=1のXOR parityを追加し、random drop 10%条件でFEC ON/OFFを同一seedで比較。
 - **現象**：effective missingを約73%削減。120 kHzではusable datagramが875,299件増加。
@@ -154,13 +157,34 @@ UDP ベースの自己回復リンク基盤を段階的に実装しながら、�
 
 ![XOR FEC回復効果](reports/figures/readme_fec_effect.png)
 
-#### 3-4. 3方式の比較
+##### 1-6-4. 3方式の比較
 
 - **やったこと**：raw missing、recovered、effective missing、usable datagram、latencyを方式間で比較。
 - **現象**：3方式すべてで欠落改善を確認したが、Adaptive Rateは受信量低下、Retransmitはlatency増加、FECはparity待ちと未回復欠落が残った。
 - **示唆**：輻輳にはAdaptive Rate、履歴欠落にはRetransmit、ランダム単発欠落にはFECという役割分担が妥当。
 
 ![自己回復方式の比較](reports/figures/readme_fec_effect.png)
+### 3. Pi 5–Pico UART通信・telemetry評価
+
+**目的**：Pi 5とPico間のpacket通信を実機構成で確認し、ACK/NACK、CRC、sequence、telemetryを観測可能にする。
+
+**実験方法**：Pi 5側のPC harnessからUARTでDATA packetを送信し、PicoからACK/NACKとtelemetryを受信。送受信ログをCSVに保存し、summaryを生成する。
+
+**結果のまとめ**：UART packet format、PC harness、Pico firmware、telemetry schema、summary生成の一連の評価系を整備した。sample baselineではCRC error 0、sequence gap 0を確認できる構成になっている。
+
+#### 3-1. UART packet通信
+
+- **やったこと**：DATA packetをPi 5からPicoへ送信し、Pico側のACK/NACKを記録。
+- **現象**：PC TX/RXログとMCU telemetryをtrial単位で保存できる。
+- **示唆**：UDP loopbackとは別に、実機MCUを含む通信経路を同じCSVベースで評価できる。
+
+#### 3-2. MCU telemetryとsummary
+
+- **やったこと**：CRC error、sequence gap、送受信数、MCU stateをtelemetryとして収集し、summary.csvに集計。
+- **現象**：sample baselineではCRC error 0、sequence gap 0、正常状態を確認。
+- **示唆**：通信結果だけでなく、MCU内部状態と通信品質を対応付けて分析できる。
+
+関連資料: [UART demo](docs/mcu_uart_link_demo.md)、[PC harness](scripts/mcu_uart/pc_harness.py)、[sample baseline](data/mcu_uart/sample_baseline/)。
 ## 成果物と再現方法
 
 - 実験レポート: [`reports/`](reports/)、生データ: [`data/`](data/)
