@@ -35,7 +35,9 @@ UDP ベースの自己回復リンク基盤を段階的に実装しながら、�
   - [CI](#ci)
 - [Repository Layout](#repository-layout)
 - [Prerequisites](#prerequisites)
-## 3つの主要成果`r`n`r`n### 1. Pi 5–Pico UART通信・telemetry評価
+## 3つの主要成果
+
+### 1. Pi 5–Pico UART通信・telemetry評価
 
 **目的**：Pi 5とPico間のpacket通信を実機構成で確認し、ACK/NACK、CRC、sequence、telemetryを観測可能にする。
 
@@ -56,7 +58,8 @@ UDP ベースの自己回復リンク基盤を段階的に実装しながら、�
 - **示唆**：通信結果だけでなく、MCU内部状態と通信品質を対応付けて分析できる。
 
 関連資料: [UART demo](docs/mcu_uart_link_demo.md)、[PC harness](scripts/mcu_uart/pc_harness.py)、[sample baseline](data/mcu_uart/sample_baseline/)。
-`r`n### 2. Pi 5 loopbackでのUDP性能評価・障害検知・自己回復
+
+### 2. Pi 5 loopbackでのUDP性能評価・障害検知・自己回復
 
 **目的**：再現可能な計測基盤を作り、障害検知とUDP処理の限界を定量化する。
 
@@ -70,7 +73,7 @@ UDP ベースの自己回復リンク基盤を段階的に実装しながら、�
 - **現象**：120 frame/s条件でP99平均0.360 ms、最大偏差6.94%、再現性判定 `yes`。
 - **示唆**：単発値ではなく、複数trialの分布で性能を評価できる。
 
-![W04再現性](reports/figures/readme_fsm_recovery.png)
+関連データ: [W04再現性CSV](logs/reproducibility/w04_baseline_20260429/reproducibility_check.csv)
 
 #### 2-2. 障害検知FSMとtimeout-only比較
 
@@ -104,7 +107,8 @@ UDP ベースの自己回復リンク基盤を段階的に実装しながら、�
 
 ![CPU affinity比較](reports/figures/w08_cpu_affinity_rate_500000_rxpin_x_txpin_max_latency_ms_avg.png)
 
-`r`n#### 2-6. UDP自己回復機構
+
+#### 2-6. UDP自己回復機構
 
 **目的**：欠落原因ごとに回復方式を選び、missing削減とlatency・throughputのトレードオフを評価する。
 
@@ -126,7 +130,7 @@ UDP ベースの自己回復リンク基盤を段階的に実装しながら、�
 - **現象**：effective missingを45.7%削減し、54,801 frameを回復。平均latencyは0.750 msから10.003 msへ増加。
 - **示唆**：完全性を高められるが、古いframeの後着によるlatency増加を許容する必要がある。
 
-![Retransmit結果](reports/figures/w09_adaptive_off_on_boxplot.png)
+関連データ: [Retransmitレポート](reports/w09_retransmit_summary.md)
 
 ##### 2-6-3. XOR FEC
 
@@ -142,8 +146,9 @@ UDP ベースの自己回復リンク基盤を段階的に実装しながら、�
 - **現象**：3方式すべてで欠落改善を確認したが、Adaptive Rateは受信量低下、Retransmitはlatency増加、FECはparity待ちと未回復欠落が残った。
 - **示唆**：輻輳にはAdaptive Rate、履歴欠落にはRetransmit、ランダム単発欠落にはFECという役割分担が妥当。
 
-![自己回復方式の比較](reports/figures/readme_fec_effect.png)
-`r`n### 3. PicoでのBare-metal / FreeRTOSリアルタイム性評価
+比較データ: [W09総合サマリー](reports/w09_missing_improvement_final_summary.md)
+
+### 3. PicoでのBare-metal / FreeRTOSリアルタイム性評価
 
 **目的**：周期TX処理をRX workloadから保護する設計と、task間通信のコストを検証する。
 
