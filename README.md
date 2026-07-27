@@ -21,76 +21,133 @@ UDP ベースの自己回復リンク基盤を段階的に実装しながら、�
 - [Prerequisites](#prerequisites)
 ## 3つの主要成果
 
-このプロジェクトでは、**測る → 限界を特定する → 壊れても戻す**の順で UDP リンクを設計しました。数値は Raspberry Pi 5 loopback または Raspberry Pi Pico の独立試行です。
+### 1. Pi 5 loopbackでのUDP性能評価
 
-### 1. 再現可能な計測基盤と障害検知FSM
-**目的**：UDP性能と障害復旧を、同じ指標・同じ条件で再現可能に比較する。
+**目的**：再現可能な計測基盤を作り、障害検知とUDP処理の限界を定量化する。
 
-**実験方法**：Pi 5 loopbackで複数trialを実行し、P50/P95/P99、seq gap、CRC、CPU使用率を固定形式で記録。0.5/1/3秒のoutageを注入し、FSMとtimeout-onlyを比較。
+**実験方法**：Pi 5 loopbackで複数trialを実行し、再現性、outage、送信レート、socket buffer、CPU affinityを比較する。
 
-**結果のまとめ**：P99の再現性を確認し、3秒outageではFSMの状態遷移を検出。
+**結果のまとめ**：120,000 Hzまでは欠落なし。3秒outageではFSMが復旧状態まで検出。bufferやaffinityはdrop・tail latency・再現性に影響した。
 
+#### 1-1. 再現性評価
 
-UDPリンクの改善を評価するには、まず「何が起きたか」を同じ尺度で記録する必要があります。そこで `trial_summary` に P50/P95/P99、seq gap、CRC、CPU 使用率を固定し、3 trial の P99 が平均の ±15% 以内かを自動判定するスクリプトと CI を整備しました。さらに outage を 0.5/1/3 秒で再現し、短い揺らぎは無視し、3 秒停止だけを `Normal → Degraded → Recover → Normal` と検出する2-window FSMを実装しました。結果として、性能改善と障害検知を同じログから再現可能に比較できる基盤を作りました。
+- **やったこと**：同一条件で3 trialを実行し、P50/P95/P99、pps、CPU使用率を比較。
+- **現象**：120 frame/s条件でP99平均0.360 ms、最大偏差6.94%、再現性判定 `yes`。
+- **示唆**：単発値ではなく、複数trialの分布で性能を評価できる。
 
-関連データ: [W04 reproducibility](logs/reproducibility/w04_baseline_20260429/reproducibility_check.csv)、[W05 FSM compare](logs/fsm_recovery/w05_compare_baseline/compare_summary.csv)。
+![W04再現性](reports/figures/readme_fsm_recovery.png)
 
-![FSMの障害検知と復旧](reports/figures/readme_fsm_recovery.png)
+#### 1-2. 障害検知FSMとtimeout-only比較
 
-さらにLinuxとPicoのjitterを同じpercentile規則で比較するため、[W06 report](reports/w06_jitter_summary.md) と [W06 raw data](data/w06/jitter_comparison.csv) を整備しました。
+- **やったこと**：0.5秒、1秒、3秒の通信停止を再現し、FSMとtimeout-onlyを比較。
+- **現象**：0.5/1秒停止は誤検知なし。3秒停止では `Normal → Degraded → Recover → Normal` を検出。FSM復旧完了7,667 ms、timeout-only 8,000 ms。
+- **示唆**：短時間の揺らぎと長時間障害を区別し、復旧状態を明示できる。
 
-### 2. Bare-metal/FreeRTOSのリアルタイム性とUDP負荷限界
-**目的**：UDP処理がどのレートで飽和するか、また周期TX処理をRX負荷から守れるかを明らかにする。
+![FSM状態遷移](reports/figures/readme_fsm_recovery.png)
 
-**実験方法**：Pi 5では送信レート・socket buffer・CPU affinityを掃引。Picoでは同一RX workloadをBare-metalとFreeRTOSで各3回実行し、TX jitterとqueue hand-offを測定。
+#### 1-3. 送信レート sweep
 
-**結果のまとめ**：Pi 5では120 kHzまで欠落なし、PicoではFreeRTOSのTX jitter P95/P99を0 µsに抑制。
+- **やったこと**：50〜1,000,000 Hzで送信し、missing、CPU、P95/P99/max latencyを測定。
+- **現象**：120,000 Hzまでは欠落なし。140,000 Hzからgap。500,000 Hzではmissing率2.37%、P99 latency 0.410 ms。
+- **示唆**：限界はlatency悪化より先にdropとして現れるため、missingとtail latencyを同時に見る必要がある。
 
+![送信レートと欠落](reports/figures/w08_socket_buffer_highrate_default_sndbuf_rxbuf_x_rate_missing_delta_total_avg.png)
 
-Linux loopbackで送信レートを 50〜1,000,000 Hz、socket buffer、CPU affinity の組み合わせで掃引しました。**120,000 Hz までは欠落なし、140,000 Hz から gap、500,000 Hz では欠落率 2.37%・P99 0.410 ms** となり、処理能力/socket queue の限界を超えると latency の連続的な悪化より先に drop が現れることを確認しました。これにより、レート上限を平均値だけで決めず、missing・p99/max・queue backlog の境界として設計できるようにしました。
+#### 1-4. socket buffer比較
 
-![送信レートと欠落の関係](reports/figures/w08_socket_buffer_highrate_default_sndbuf_rxbuf_x_rate_missing_delta_total_avg.png)
+- **やったこと**：socket bufferサイズを変え、dropとlatencyを比較。
+- **現象**：buffer増加でdropは減る一方、queue滞留によりP95/P99/max latencyが増える条件を確認。
+- **示唆**：drop最小化とtail latency最小化はトレードオフ。
 
-関連データ: [W08 rate sweep summary](reports/w08_send_interval_summary.md)、[summary CSV](data/w08/send_interval/w08_send_interval_summary.csv)。50〜1,000,000 Hzを各3 trialで測定し、sample数、実効受信rate、missing、CPU、mean/p95/p99/max latencyを集計しました。socket buffer/CPU affinityの比較結果は [W08 socket buffer](reports/w08_socket_buffer_highrate_summary.md) と [W08 CPU affinity](reports/w08_cpu_affinity_matrix_summary.md) にまとめています。
+![socket bufferとlatency](reports/figures/w08_socket_buffer_highrate_default_sndbuf_rxbuf_x_rate_p99_latency_ms_avg.png)
 
-Pico では bare-metal と FreeRTOS を同一 workload で比較。優先度付き task 分離により TX イベントの P95/P99 jitter は **1,839 µs → 0 µs（100%削減）**、queue hand-off P95 は 8 µs、deadline miss は 0 件でした。RTOS が常に速いのではなく、周期処理を RX workload から隔離できた結果です。
+#### 1-5. CPU affinity比較
 
-![bare-metal jitter](reports/figures/w07_baremetal_abs_jitter_distribution.svg)
+- **やったこと**：TX/RXを同一core、別coreに固定して比較。
+- **現象**：低〜中レートでは末尾latency outlierの切り分けに有効。高レートではcore分離後も飽和dropが残った。
+- **示唆**：affinityは高速化の万能策ではなく、再現性向上と原因分離の手段。
 
-![Bare-metal / FreeRTOS比較](reports/figures/readme_rtos_jitter.png)
+![CPU affinity比較](reports/figures/w08_cpu_affinity_rate_500000_rxpin_x_txpin_max_latency_ms_avg.png)
+
+### 2. PicoでのBare-metal / FreeRTOSリアルタイム性評価
+
+**目的**：周期TX処理をRX workloadから保護する設計と、task間通信のコストを検証する。
+
+**実験方法**：Picoで同一RX workloadをBare-metalとFreeRTOSで各3回実行し、TX jitter、queue hand-off、deadline missを測定。Pi 5 Linux user-space loopとも比較する。
+
+**結果のまとめ**：FreeRTOSではTX jitter P95/P99が0 µs、queue hand-off P95が8 µs、deadline missが0件。周期処理の分離効果を確認した。
+
+#### 2-1. Bare-metal周期処理
+
+- **やったこと**：単一loop内でRX相当処理と周期TXイベントを実行。
+- **現象**：TX jitterのP95/P99は1,839 µs。
+- **示唆**：RX workloadの実行時間が周期TXのタイミングに影響した。
+
+![Bare-metal jitter](reports/figures/w07_baremetal_abs_jitter_distribution.svg)
+
+#### 2-2. FreeRTOS task分離
+
+- **やったこと**：TX、STATE、RXをtaskに分離し、優先度をTX=3、STATE=2、RX=1に設定。
+- **現象**：TX jitterのP95/P99は0 µs、deadline missは0件。
+- **示唆**：高優先度TX taskにより周期処理をRX負荷から保護できた。
+
 ![FreeRTOS jitter](reports/figures/w07_freertos_abs_jitter_distribution.svg)
 
-![bare-metal / FreeRTOS jitter比較](reports/figures/readme_rtos_jitter.png)
+#### 2-3. FreeRTOS queue hand-off
 
-関連データ: [W07 report](reports/w07_rtos_jitter_summary.md)、[summary CSV](data/w07/w07_jitter_summary.csv)。Picoで各モード3 run、各999 intervalを取得し、jitter分布、queue latency、deadline miss、queue send failureまで集計しました。実装は [FreeRTOS firmware](firmware/w07_rtos_jitter/) と [task architecture](docs/w07_task_architecture.md) に記録しています。
+- **やったこと**：TX taskからSTATE taskへqueueでイベントを渡し、送受信遅延を測定。
+- **現象**：queue hand-off P95/P99は8 µs、最大80 µs。3,000イベントを全件受信し、send failureとmissing receiveは0件。
+- **示唆**：task分割によるqueue通信は、今回の条件では許容可能なオーバーヘッドだった。
 
-### 3. Feedbackベース自己回復（Adaptive Rate・再送・XOR FEC）
-**目的**：欠落の原因に応じて回復方式を選べるようにし、missing削減とlatency・throughputのトレードオフを測定する。
+![FreeRTOS queue latency](reports/figures/w07_freertos_queue_latency_distribution.svg)
 
-**実験方法**：feedback packetを追加し、Adaptive Rate、Retransmit、XOR FECを実装。ON/OFF、同一drop seed、複数trialでraw missing、recovered、effective missing、usable datagramを比較。
+#### 2-4. LinuxとPicoの周期jitter比較
 
-**結果のまとめ**：Adaptive Rate、Retransmit、XOR FECのいずれも欠落を改善したが、各方式でthroughputまたはlatencyのコストを確認。
+- **やったこと**：Pi 5 Linux user-space loopとPico hardware-timer loopを比較。
+- **現象**：LinuxのP99 jitterは5 µs、Picoは0 µs。最大値はLinux 55 µs、Pico 2 µs。
+- **示唆**：hardware timerは送信側のスケジューリングノイズを抑える基準として有効。
 
+![Linux / Pico jitter比較](reports/figures/readme_rtos_jitter.png)
 
-欠落を検出するだけでなく回復させるため、feedback packet、bounded retransmit buffer、XOR parity を実装しました。同一 seed / 複数 trial で ON/OFF を比較し、missing rateだけでなく effective missing、usable datagram、latencyまで評価しました。
+### 3. Pi 5 loopbackでのUDP自己回復機構
 
-| 手段 | 実験結果 | 示唆 |
-|---|---:|---|
-| adaptive rate | missing 2.8919% → 2.7661% | 改善は小幅。受信総量は約54%に低下 |
-| retransmit | effective missing **45.7%削減**、54,801 frame 回復 | 有効だが平均 latency 0.750 → 10.003 ms |
-| XOR FEC (k=4,r=1) | random drop 10%で effective missing **約73%削減**、usable +875,299 (120 kHz) | 単発欠落に強いが parity 待ち・複数欠落は未回復 |
+**目的**：欠落原因ごとに回復方式を選び、missing削減とlatency・throughputのトレードオフを評価する。
 
-![adaptive rate の OFF/ON 比較](reports/figures/w09_adaptive_off_on_boxplot.png)
+**実験方法**：feedback packetを追加し、Adaptive Rate、Retransmit、XOR FECを実装。ON/OFF、同一drop seed、複数trialで比較する。
 
-![XOR FECによる欠落回復](reports/figures/readme_fec_effect.png)
+**結果のまとめ**：Adaptive Rateは小幅改善、Retransmitは欠落回復と引き換えにlatency増加、XOR FECはrandom dropに対して約73%のeffective missing削減を確認した。
 
-![FSMによる障害検知](reports/figures/readme_fsm_recovery.png)
-![XOR FECの欠落回復効果](reports/figures/readme_fec_effect.png)
+#### 3-1. Adaptive Rate
 
-関連データ: [W05 FSM比較](logs/fsm_recovery/w05_compare_baseline/interpretation.md)、[adaptive rate](reports/w09_adaptive_rate_summary.md)、[retransmit](reports/w09_retransmit_summary.md)、[FEC比較](reports/w09_fec_comparison_summary.md)。W09では各方式を単なる実装確認で終わらせず、ON/OFF、同一drop seed、複数trialで raw missing / recovered / effective missing / usable datagram / latency を比較しました。raw CSVは [FEC 1200 Hz](data/w09/fec_comparison/fec_comparison.csv) と [FEC 120 kHz](data/w09/fec_comparison_rate_120000/fec_comparison.csv) で確認できます。
+- **やったこと**：feedbackでmissingを検出し、送信rateを動的に下げる制御を実装。
+- **現象**：missingは2.8919%から2.7661%へ改善。一方、受信総量は約54%に低下。
+- **示唆**：最大throughputではなく、輻輳時の退避機構として適する。
 
-結論は単一の最適解ではなく、**輻輳には rate 制御、履歴に残る欠落には retransmit、ランダム単発欠落には FEC** と故障モードに応じて選択する設計です。
+![Adaptive Rate ON/OFF](reports/figures/w09_adaptive_off_on_boxplot.png)
 
+#### 3-2. Retransmit
+
+- **やったこと**：feedbackで欠落範囲を通知し、bounded bufferから再送。
+- **現象**：effective missingを45.7%削減し、54,801 frameを回復。平均latencyは0.750 msから10.003 msへ増加。
+- **示唆**：完全性を高められるが、古いframeの後着によるlatency増加を許容する必要がある。
+
+![Retransmit結果](reports/figures/w09_adaptive_off_on_boxplot.png)
+
+#### 3-3. XOR FEC
+
+- **やったこと**：k=4、r=1のXOR parityを追加し、random drop 10%条件でFEC ON/OFFを同一seedで比較。
+- **現象**：effective missingを約73%削減。120 kHzではusable datagramが875,299件増加。
+- **示唆**：単発datagram欠落には強いが、同一block内の複数欠落やparity欠落は回復できない。
+
+![XOR FEC回復効果](reports/figures/readme_fec_effect.png)
+
+#### 3-4. 3方式の比較
+
+- **やったこと**：raw missing、recovered、effective missing、usable datagram、latencyを方式間で比較。
+- **現象**：3方式すべてで欠落改善を確認したが、Adaptive Rateは受信量低下、Retransmitはlatency増加、FECはparity待ちと未回復欠落が残った。
+- **示唆**：輻輳にはAdaptive Rate、履歴欠落にはRetransmit、ランダム単発欠落にはFECという役割分担が妥当。
+
+![自己回復方式の比較](reports/figures/readme_fec_effect.png)
 ## 成果物と再現方法
 
 - 実験レポート: [`reports/`](reports/)、生データ: [`data/`](data/)
