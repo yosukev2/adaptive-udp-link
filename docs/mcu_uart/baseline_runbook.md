@@ -175,8 +175,19 @@ s.close()
 
 ## 手順 6: firmware をビルド
 
+まず SDK の場所を特定する。`PICO_SDK_PATH` は
+`external/pico_sdk_import.cmake` の 2 つ上の階層。
+
 ```bash
-export PICO_SDK_PATH=/path/to/pico-sdk        # 例: /home/pi5/pico/pico-sdk
+find ~ -maxdepth 4 -name pico_sdk_import.cmake 2>/dev/null
+```
+
+見つかったパスに合わせて設定し、存在を確認してからビルドする。
+
+```bash
+export PICO_SDK_PATH=$HOME/pico/pico-sdk
+ls -d "$PICO_SDK_PATH/external/pico_sdk_import.cmake"
+
 cmake -G Ninja -S firmware/mcu_uart_link -B firmware/mcu_uart_link/build
 cmake --build firmware/mcu_uart_link/build
 ls -l firmware/mcu_uart_link/build/mcu_uart_link.uf2
@@ -184,9 +195,20 @@ ls -l firmware/mcu_uart_link/build/mcu_uart_link.uf2
 
 期待結果: `mcu_uart_link.uf2` が生成される。
 
-失敗したら: `picotool` の UF2 変換で落ちる場合、ELF/BIN は生成されている。
-`picotool` を別途インストールするか、`-DMCU_UART_LINK_ENABLE_PICOTOOL=OFF` で
-再 configure して BIN から UF2 を作る。
+FreeRTOS はこの firmware では使わないので `FREERTOS_KERNEL_PATH` は不要。
+
+失敗したら:
+
+- `Unknown CMake command "pico_sdk_init"` は `PICO_SDK_PATH` が違う。**configure に
+  失敗した `build/` は壊れたキャッシュを残すので、必ず削除してからやり直す。**
+
+  ```bash
+  rm -rf firmware/mcu_uart_link/build
+  ```
+
+- `picotool` の UF2 変換で落ちる場合、ELF/BIN は生成されている。`picotool` を別途
+  インストールするか、`-DMCU_UART_LINK_ENABLE_PICOTOOL=OFF` で再 configure して
+  BIN から UF2 を作る。
 
 ---
 
