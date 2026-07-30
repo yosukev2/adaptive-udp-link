@@ -132,19 +132,37 @@ sudo raspi-config
 #   3 Interface Options -> I6 Serial Port
 #     "login shell accessible over serial?"  -> No
 #     "serial port hardware enabled?"        -> Yes
+```
+
+**Pi 5 では `/dev/ttyAMA0` (GPIO14/15) が使えない場合がある。** device file は生成
+され GPIO の導通も正常なのに TX が出力されない事象を確認済み。この構成では
+`uart2` (GPIO4/5) を使う。
+
+`/boot/firmware/config.txt` に overlay を入れて永続化する。
+
+```bash
+grep -n uart /boot/firmware/config.txt
+echo "dtoverlay=uart2" | sudo tee -a /boot/firmware/config.txt
 sudo reboot
 ```
 
 再起動後に確認する。
 
 ```bash
-ls -l /dev/ttyAMA0
-grep -E "enable_uart|console=serial" /boot/firmware/config.txt /boot/firmware/cmdline.txt
+ls -l /dev/ttyAMA2
+grep -E "uart|console=serial" /boot/firmware/config.txt /boot/firmware/cmdline.txt
+systemctl is-active serial-getty@ttyAMA2.service
 ```
 
-期待結果: `/dev/ttyAMA0` が存在し、`cmdline.txt` に `console=serial0` が**無い**。
+期待結果: `/dev/ttyAMA2` が存在し、`cmdline.txt` に `console=serial0` が**無く**、
+getty が `inactive`。
 
-失敗したら: `/boot/firmware/config.txt` に `enable_uart=1` を追記して再起動。
+失敗したら: getty が `active` なら以下で止める。
+
+```bash
+sudo systemctl stop serial-getty@ttyAMA2.service
+sudo systemctl disable serial-getty@ttyAMA2.service
+```
 
 ---
 
@@ -153,12 +171,12 @@ grep -E "enable_uart|console=serial" /boot/firmware/config.txt /boot/firmware/cm
 Pico を繋ぐ前に、Pi 側の UART だけを確認する。**この確認をしておくと、後で失敗した
 ときに原因が Pi 設定か配線/Pico かに絞れる。**
 
-ジャンパ 1 本で **pin 8 と pin 10 を直結**する。
+ジャンパ 1 本で **pin 7 (GPIO4) と pin 29 (GPIO5) を直結**する。
 
 ```bash
 python3 -c "
 import serial, time
-s = serial.Serial('/dev/ttyAMA0', 115200, timeout=1)
+s = serial.Serial('/dev/ttyAMA2', 115200, timeout=1)
 s.write(b'hello'); time.sleep(0.2); print(s.read(5))
 s.close()
 "
@@ -166,10 +184,19 @@ s.close()
 
 期待結果: `b'hello'` が返る。
 
-失敗したら: 配線ではなく手順 4 の設定問題。`b''` なら console が port を掴んでいる
-可能性が高いので `sudo systemctl stop serial-getty@ttyAMA0.service` を試す。
+失敗したら: 配線ではなく手順 4 の設定問題。
 
-確認できたらループバックのジャンパを外す。
+- `b''` が返る場合、port は開けているが信号が往復していない。別の UART でも同じ
+  試験を行い、使える口を先に確定させる。ここで `/dev/ttyAMA0` が PASS しない実例が
+  あるため、**port は決め打ちにせず実測で選ぶ。**
+- `Permission denied` なら `sudo usermod -aG dialout $USER` して再ログイン。
+
+確認できたらループバックのジャンパを外す。以降の手順は、ここで PASS した port を
+`$PORT` として扱う。
+
+```bash
+export PORT=/dev/ttyAMA2
+```
 
 ---
 
@@ -239,15 +266,17 @@ sudo shutdown -h now
 
 | Pi 5 | 物理 pin | 向き | Pico | 物理 pin |
 |------|---------:|:----:|------|---------:|
-| GPIO14 (TXD) | 8 | -> | GPIO1 (RX) | 2 |
-| GPIO15 (RXD) | 10 | <- | GPIO0 (TX) | 1 |
-| GND | 6 | -- | GND | 3 |
+| GPIO4 (uart2 TXD) | 7 | -> | GPIO1 (RX) | 2 |
+| GPIO5 (uart2 RXD) | 29 | <- | GPIO0 (TX) | 1 |
+| GND | 9 | -- | GND | 3 |
 
-Pi 5 の pin 6 / 8 / 10 は**基板の外周側の列**にあり、pin 1 側の端から数えて
-3・4・5 番目。Pico の pin 1/2/3 は USB を上にしたとき左列の上から 3 本。
+Pi 5 の pin 7 / 9 / 29 は**内側の列（奇数 pin）**。pin 7 と pin 9 は隣接している
+が、pin 29 は離れているので数え間違えやすい。GND は pin 6 / 39 でも電気的に同じ。
 
-**3.3V と 5V は繋がない。線は 3 本だけ。** Pi の pin 2 / pin 4 は 5V なので、
-pin 6 の数え間違いは Pico の破損に直結する。数えたら一度確認する。
+Pico の pin 1/2/3 は USB を上にしたとき左列の上から 3 本。
+
+**3.3V と 5V は繋がない。線は 3 本だけ。** Pi の pin 1 / pin 17 は 3.3V、
+pin 2 / pin 4 は 5V。数え間違いは Pico の破損に直結するので、挿す前に一度確認する。
 
 配線後、Pico の USB を Pi 5 の USB port に挿してから Pi 5 を起動する。
 
@@ -256,11 +285,12 @@ pin 6 の数え間違いは Pico の破損に直結する。数えたら一度�
 ## 手順 9: device を確認
 
 ```bash
-ls -l /dev/ttyAMA0 /dev/ttyACM0
+export PORT=/dev/ttyAMA2
+ls -l "$PORT" /dev/ttyACM0
 ```
 
-期待結果: 両方存在する。`/dev/ttyAMA0` が packet link、`/dev/ttyACM0` が
-Pico の USB CDC (telemetry)。
+期待結果: 両方存在する。`$PORT` が packet link、`/dev/ttyACM0` が
+Pico の USB CDC (telemetry)。手順 8 で再起動している場合は `$PORT` を再設定する。
 
 失敗したら: `/dev/ttyACM0` が無い場合は firmware が焼けていないか、USB ケーブルが
 給電専用。手順 7 に戻る。
@@ -293,7 +323,7 @@ head -1 logs/mcu_uart/$TRIAL/mcu_telemetry.csv
 
 ```bash
 python scripts/mcu_uart/pc_harness.py \
-  --port /dev/ttyAMA0 \
+  --port "$PORT" \
   --baudrate 115200 \
   --trial-id $TRIAL \
   --test-name m0_baseline_10pkt \
@@ -306,7 +336,8 @@ python scripts/mcu_uart/pc_harness.py \
 期待結果: エラーなく終了する。
 
 `--firmware-version` に commit を入れておくと、後から firmware と log を対応付け
-られる。USB-serial アダプタ経由なら `--port /dev/ttyUSB0` にする。
+られる。`$PORT` は手順 5 のループバックで PASS した port。USB-serial アダプタ経由
+なら `/dev/ttyUSB0` になる。
 
 ---
 
@@ -383,6 +414,7 @@ column -s, -t < logs/mcu_uart/$TRIAL/summary.csv
 |------|----------|
 | `pc_rx_log.csv` が header だけ | TX/RX がクロスされていない |
 | `rx_byte_count=0` | 配線、GND、Pi 側 console が port を掴んでいる |
+| harness は成功するが MCU に何も届かない | port が別の UART を指している。手順 5 の loopback を該当 port で再確認する |
 | 文字化けのような preamble miss が大量 | baudrate 不一致 |
 | `/dev/ttyACM0` が無い | firmware 未書き込み、USB ケーブルが給電専用 |
 
