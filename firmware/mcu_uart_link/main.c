@@ -25,7 +25,6 @@
 #define LINK_UART_RX_PIN 1
 #define LINK_BAUDRATE 115200
 #define TELEMETRY_PERIOD_MS 200
-#define TELEMETRY_HOST_WAIT_MS 10000
 
 #ifndef MCU_TRIAL_ID
 #define MCU_TRIAL_ID "mcu_uart_link"
@@ -192,20 +191,22 @@ static void recover_from_overflow(void)
 }
 
 /*
- * The CSV header is printed once. Waiting for the USB CDC host to attach keeps
- * it from being emitted into a port nobody is capturing yet, which would leave
- * mcu_telemetry.csv without its column names.
+ * The CSV header is emitted on the rising edge of the USB CDC connection rather
+ * than once at boot. A capture started at any time therefore receives the column
+ * names, instead of only the runs that attach within a fixed window after reset.
+ *
+ * A header cannot land mid-file: losing the connection removes the CDC device,
+ * which ends the capturing reader and closes its file, so a reconnect always
+ * writes into a new one.
  */
-static void wait_for_telemetry_host(void)
+static bool telemetry_host_attached(void)
 {
-    absolute_time_t deadline = make_timeout_time_ms(TELEMETRY_HOST_WAIT_MS);
+    static bool was_connected;
+    bool connected = stdio_usb_connected();
+    bool attached = connected && !was_connected;
 
-    while (!stdio_usb_connected()) {
-        if (absolute_time_diff_us(get_absolute_time(), deadline) <= 0) {
-            return;
-        }
-        sleep_ms(10);
-    }
+    was_connected = connected;
+    return attached;
 }
 
 int main(void)
@@ -218,8 +219,6 @@ int main(void)
     mcu_uart_parser_init(&g_parser);
     memset(&g_counters, 0, sizeof(g_counters));
 
-    wait_for_telemetry_host();
-    print_telemetry_header();
     next_telemetry = make_timeout_time_ms(TELEMETRY_PERIOD_MS);
 
     for (;;) {
@@ -230,7 +229,17 @@ int main(void)
             }
         }
 
-        if (absolute_time_diff_us(get_absolute_time(), next_telemetry) <= 0) {
+        if (telemetry_host_attached()) {
+            print_telemetry_header();
+            next_telemetry = make_timeout_time_ms(TELEMETRY_PERIOD_MS);
+        }
+
+        /*
+         * Counters are cumulative and are never reset on reconnect, so a capture
+         * that starts late still reports totals for the whole run.
+         */
+        if (stdio_usb_connected() &&
+            absolute_time_diff_us(get_absolute_time(), next_telemetry) <= 0) {
             print_telemetry_row();
             g_counters.telemetry_sent_count++;
             next_telemetry = make_timeout_time_ms(TELEMETRY_PERIOD_MS);
