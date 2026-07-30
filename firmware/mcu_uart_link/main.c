@@ -31,6 +31,16 @@
 #endif
 
 /*
+ * HEARTBEAT emission period in milliseconds; 0 disables it. Off by default so a
+ * baseline run records only DATA and ACK traffic. Enabling it makes the board
+ * transmit without being asked, which isolates the MCU-to-PC direction when the
+ * link does not come up.
+ */
+#ifndef MCU_UART_HEARTBEAT_MS
+#define MCU_UART_HEARTBEAT_MS 0
+#endif
+
+/*
  * Counters the shared parser does not own. The parser tracks RX-side packet
  * validity; these track TX side and link state, which log_schema.md also
  * requires in mcu_telemetry.csv.
@@ -212,6 +222,10 @@ static bool telemetry_host_attached(void)
 int main(void)
 {
     absolute_time_t next_telemetry;
+#if MCU_UART_HEARTBEAT_MS > 0
+    absolute_time_t next_heartbeat;
+    uint32_t heartbeat_seq = 0;
+#endif
 
     stdio_init_all();
     link_uart_init();
@@ -220,6 +234,9 @@ int main(void)
     memset(&g_counters, 0, sizeof(g_counters));
 
     next_telemetry = make_timeout_time_ms(TELEMETRY_PERIOD_MS);
+#if MCU_UART_HEARTBEAT_MS > 0
+    next_heartbeat = make_timeout_time_ms(MCU_UART_HEARTBEAT_MS);
+#endif
 
     for (;;) {
         while (uart_is_readable(LINK_UART)) {
@@ -228,6 +245,16 @@ int main(void)
                 recover_from_overflow();
             }
         }
+
+#if MCU_UART_HEARTBEAT_MS > 0
+        if (absolute_time_diff_us(get_absolute_time(), next_heartbeat) <= 0) {
+            if (send_packet(MCU_UART_PACKET_HEARTBEAT, heartbeat_seq, NULL, 0)) {
+                heartbeat_seq++;
+                g_counters.heartbeat_sent_count++;
+            }
+            next_heartbeat = make_timeout_time_ms(MCU_UART_HEARTBEAT_MS);
+        }
+#endif
 
         if (telemetry_host_attached()) {
             print_telemetry_header();

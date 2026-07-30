@@ -34,6 +34,14 @@ target_link_libraries(mcu_uart_link
     hardware_uart
 )
 
+# Diagnostic aid: a non-zero period makes the board emit HEARTBEAT packets
+# without being asked, which exercises the MCU-to-PC direction on its own.
+# Left at 0 for baseline runs so the logs contain only DATA and ACK.
+set(MCU_UART_HEARTBEAT_MS 0 CACHE STRING "HEARTBEAT period in ms; 0 disables")
+target_compile_definitions(mcu_uart_link PRIVATE
+    MCU_UART_HEARTBEAT_MS=${MCU_UART_HEARTBEAT_MS}
+)
+
 # Packet link uses uart0 on GPIO0/GPIO1.
 # Telemetry CSV is emitted over USB CDC so it never collides with the packet link.
 pico_enable_stdio_usb(mcu_uart_link 1)
