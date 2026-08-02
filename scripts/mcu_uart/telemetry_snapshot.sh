@@ -22,6 +22,10 @@ fi
 pkill -x cat 2>/dev/null || true
 sleep 1
 
+# Without raw mode the line discipline holds the rows back and the read comes up
+# empty even while the board is emitting normally.
+stty -F "$PORT" raw -echo
+
 timeout "$SECONDS_TO_READ" head -c 4000 "$PORT" > "$CAPTURE" || true
 
 if [ ! -s "$CAPTURE" ]; then
