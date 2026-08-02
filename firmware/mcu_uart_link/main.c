@@ -126,6 +126,22 @@ static void on_packet(const mcu_uart_packet_view_t *packet, void *user_data)
     }
 }
 
+/*
+ * Reports the pins the build actually compiled in, so a run can be attributed to
+ * a known configuration instead of an assumed one. Emitted only on diagnostic
+ * builds, and prefixed so it is not mistaken for a telemetry row.
+ */
+static void print_link_configuration(void)
+{
+#if MCU_UART_HEARTBEAT_MS > 0
+    printf("# uart0 tx=GP%u rx=GP%u baudrate=%u heartbeat_ms=%u\n",
+           (unsigned int)LINK_UART_TX_PIN,
+           (unsigned int)LINK_UART_RX_PIN,
+           (unsigned int)LINK_BAUDRATE,
+           (unsigned int)MCU_UART_HEARTBEAT_MS);
+#endif
+}
+
 static void print_telemetry_header(void)
 {
     printf("trial_id,mono_ms,state,last_error_code,last_seq,expected_seq,"
@@ -267,6 +283,7 @@ int main(void)
 #endif
 
         if (telemetry_host_attached()) {
+            print_link_configuration();
             print_telemetry_header();
             next_telemetry = make_timeout_time_ms(TELEMETRY_PERIOD_MS);
         }
