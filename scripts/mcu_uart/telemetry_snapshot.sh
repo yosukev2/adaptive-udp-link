@@ -26,7 +26,10 @@ sleep 1
 # empty even while the board is emitting normally.
 stty -F "$PORT" raw -echo
 
-timeout "$SECONDS_TO_READ" head -c 4000 "$PORT" > "$CAPTURE" || true
+# cat writes straight through, so the rows already read survive the timeout's
+# signal. A byte-counting reader would buffer them and lose the lot when killed
+# before reaching its count.
+timeout "$SECONDS_TO_READ" cat "$PORT" > "$CAPTURE" || true
 
 if [ ! -s "$CAPTURE" ]; then
     echo "no telemetry from $PORT within ${SECONDS_TO_READ}s"
