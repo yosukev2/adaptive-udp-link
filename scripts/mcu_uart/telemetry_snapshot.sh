@@ -39,9 +39,11 @@ if [ ! -s "$CAPTURE" ]; then
 fi
 
 awk -F, '
-NR == 1 && $1 == "trial_id" { for (i = 1; i <= NF; i++) name[i] = $i; next }
+/^#/ { configuration = $0; next }
+$1 == "trial_id" { for (i = 1; i <= NF; i++) name[i] = $i; next }
 NF > 5 { for (i = 1; i <= NF; i++) value[i] = $i; fields = NF; rows++ }
 END {
+    if (configuration != "") print configuration
     if (rows == 0) {
         print "header only; no telemetry rows were emitted"
         exit 1
