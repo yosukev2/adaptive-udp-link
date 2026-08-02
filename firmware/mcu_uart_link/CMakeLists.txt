@@ -38,8 +38,16 @@ target_link_libraries(mcu_uart_link
 # without being asked, which exercises the MCU-to-PC direction on its own.
 # Left at 0 for baseline runs so the logs contain only DATA and ACK.
 set(MCU_UART_HEARTBEAT_MS 0 CACHE STRING "HEARTBEAT period in ms; 0 disables")
+
+# uart0 reaches GP0/GP1, GP12/GP13 or GP16/GP17. Overridable so a board with a
+# damaged pad can be moved to a spare pair without a source edit.
+set(MCU_UART_TX_PIN 0 CACHE STRING "GPIO carrying uart0 TX")
+set(MCU_UART_RX_PIN 1 CACHE STRING "GPIO carrying uart0 RX")
+
 target_compile_definitions(mcu_uart_link PRIVATE
     MCU_UART_HEARTBEAT_MS=${MCU_UART_HEARTBEAT_MS}
+    LINK_UART_TX_PIN=${MCU_UART_TX_PIN}
+    LINK_UART_RX_PIN=${MCU_UART_RX_PIN}
 )
 
 # Packet link uses uart0 on GPIO0/GPIO1.

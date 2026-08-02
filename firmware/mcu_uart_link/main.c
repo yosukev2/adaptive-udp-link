@@ -21,9 +21,19 @@
 #include "mcu_uart_protocol.h"
 
 #define LINK_UART uart0
-#define LINK_UART_TX_PIN 0
-#define LINK_UART_RX_PIN 1
 #define LINK_BAUDRATE 115200
+
+/*
+ * uart0 can be routed to GP0/GP1, GP12/GP13, or GP16/GP17 on RP2040. The pins
+ * are overridable so a board with damaged pads can be moved to a spare pair
+ * without editing this file.
+ */
+#ifndef LINK_UART_TX_PIN
+#define LINK_UART_TX_PIN 0
+#endif
+#ifndef LINK_UART_RX_PIN
+#define LINK_UART_RX_PIN 1
+#endif
 #define TELEMETRY_PERIOD_MS 200
 
 #ifndef MCU_TRIAL_ID
