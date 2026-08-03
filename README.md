@@ -16,25 +16,39 @@ UDP ベースの自己回復リンク基盤を段階的に実装しながら、�
 
 ### 1. Pi 5–Pico UART通信・telemetry評価
 
-**目的**：Pi 5とPico間のpacket通信を実機構成で確認し、ACK/NACK、CRC、sequence、telemetryを観測可能にする。
+**目的**：Pi 5とPico間のpacket通信を実機で成立させ、ACK、CRC、sequence、MCU内部stateを観測可能にする。loopbackやシミュレーションではなく、実際のMCUを含む経路で計測する。
 
-**実験方法**：Pi 5側のPC harnessからUARTでDATA packetを送信し、PicoからACK/NACKとtelemetryを受信。送受信ログをCSVに保存し、summaryを生成する。
+**実験方法**：packet formatを仕様として先に固定し、PC harness（Python）とMCU parser（C）を独立に実装。Pi 5からUART経由でDATA packetを送信し、PicoはACKを返しつつtelemetryをUSB CDCへ出力する。PC側の送受信ログとMCU内部カウンタを同一trialのCSVとして保存し、突き合わせて判定する。
 
-**結果のまとめ**：UART packet format、PC harness、Pico firmware、telemetry schema、summary生成の一連の評価系を整備した。sample baselineではCRC error 0、sequence gap 0を確認できる構成になっている。
+**結果のまとめ**：10 packetを送信し、**MCU側で全数受理、ACK 10件、payload完全一致10件、CRC error 0、sequence gap 0**を実測。`final_state=RUN`、`pass_fail=PASS`。判定はPC側の受信数ではなくMCU内部の`rx_data_count`を採用している。
 
-#### 1-1. UART packet通信
+#### 1-1. UART packet通信の実機成立
 
-- **やったこと**：DATA packetをPi 5からPicoへ送信し、Pico側のACK/NACKを記録。
-- **現象**：PC TX/RXログとMCU telemetryをtrial単位で保存できる。
-- **示唆**：UDP loopbackとは別に、実機MCUを含む通信経路を同じCSVベースで評価できる。
+- **やったこと**：packet v1（preamble、version、type、seq、length、CRC-32/ISO-HDLC）を仕様化し、Pi 5–Pico間で10 packetを送受信。
+- **現象**：`sent_count=10`に対し`mcu_received_count=10`、`ack_sent_count=10`、`exact_match_count=10`。CRC error、sequence gap、duplicate、buffer overflowはいずれも0。
+- **示唆**：UDP loopbackとは別に、実機MCUを含む通信経路を同じCSVベースで評価できる基盤が成立した。
 
-#### 1-2. MCU telemetryとsummary
+#### 1-2. MCU内部状態とのつき合わせ
 
-- **やったこと**：CRC error、sequence gap、送受信数、MCU stateをtelemetryとして収集し、summary.csvに集計。
-- **現象**：sample baselineではCRC error 0、sequence gap 0、正常状態を確認。
-- **示唆**：通信結果だけでなく、MCU内部状態と通信品質を対応付けて分析できる。
+- **やったこと**：MCU側で31項目のカウンタ（受信byte数、packet種別ごとの受理数、error種別、buffer使用量、state）を収集し、`summary.csv`へ集計。
+- **現象**：`rx_byte_count=321`に対し正味データは320 byte。超過1 byteは電源投入直後にRXラインが浮いていた区間のノイズで、`preamble_miss_count=1`として分離できている。
+- **示唆**：「PC側では10件受信」で終わらせず、MCUが実際に何 byte受けて何をどう捨てたかまで追える。ノイズと正常受信を切り分けられる粒度で観測できている。
 
-関連資料: [UART demo](docs/mcu_uart_link_demo.md)、[PC harness](scripts/mcu_uart/pc_harness.py)、[sample baseline](data/mcu_uart/sample_baseline/)。
+#### 1-3. 実機bring-upでの故障切り分け
+
+- **やったこと**：初回接続時に通信が成立せず、PC側UART・ジャンパ線・firmware動作・MCUピンを1要素ずつ検証。最終的にPico単体で`GP0`と`GP1`を直結する自己ループバック試験を実施。
+- **現象**：PicoはHEARTBEATを11,000 byte以上送出しているのに自身では1 byteも受信せず、**PCも配線も経路に存在しない条件で失敗**したため、故障をPico側ピンに限定できた。`GP12`/`GP13`では同一試験が成立。
+- **示唆**：切り分けは「変数を1つずつ消す」ことに尽きる。実機では想定どおりに動かない前提で、前提自体を検証する手段を先に用意しておく必要がある。
+
+この経験から、ビルド時のピン設定をfirmware自身がtelemetry先頭行へ出力するようにした。設定が反映されていないビルドで測定し、誤った結論を出しかけたため。
+
+```text
+# uart0 tx=GP12 rx=GP13 baudrate=115200 heartbeat_ms=0
+```
+
+**実測条件**：Pi 5 `/dev/ttyAMA2`（`dtoverlay=uart2-pi5`, GPIO4/5）、Pico `GP12`/`GP13`、115200 8N1、payload 16 byte。既定の`/dev/ttyAMA0`とPico `GP0`/`GP1`はこの個体では機能せず、代替ピンを実測で選定した。
+
+関連資料: [実機baseline](data/mcu_uart/m0_baseline_001/)、[bring-up切り分け手順](docs/mcu_uart/link_bringup_triage.md)、[packet仕様](docs/mcu_uart/protocol.md)、[PC harness](scripts/mcu_uart/pc_harness.py)、[MCU parser](firmware/mcu_uart_link/mcu_uart_protocol.c)。
 
 ### 2. Pi 5 loopbackでのUDP性能評価・障害検知・自己回復
 
@@ -174,7 +188,7 @@ UDP ベースの自己回復リンク基盤を段階的に実装しながら、�
 ### 現時点の課題
 
 - **実ネットワークのend-to-end評価が未実施**：Pi 5 loopbackは物理NIC、スイッチ、無線、伝送路の揺らぎを含まないため、実ネットワークで同じ欠落率・tail latencyになるとは限らない。
-- **Pi 5–Pico間の統合評価が未完了**：UART通信とPico RTOSの評価系はあるが、Pi 5のUDP自己回復処理とPicoの実通信処理を一つのend-to-end経路として接続していない。
+- **Pi 5–Pico間の統合評価が未完了**：UART通信は実機で成立し、Pico RTOSの評価系も揃っているが、Pi 5のUDP自己回復処理とPicoの実通信処理を一つのend-to-end経路として接続していない。1章のUART linkは10 packetの正常系baselineまでで、故障注入や長時間運転はこれから。
 - **FECの回復範囲**：`k=4, r=1`では同一block内の複数欠落やparity欠落を復元できない。
 - **再送の鮮度問題**：retransmitは欠落を回復できる一方、古いframeの後着でlatencyが増える。
 - **長時間・多環境の再現性**：今回の比較は主に3〜10 trialであり、長時間運転、異なる負荷、複数ボードでの評価はこれからである。
