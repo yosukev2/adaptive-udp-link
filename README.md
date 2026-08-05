@@ -13,6 +13,7 @@ UDP ベースの自己回復リンクを C で実装し、性能限界・障害�
 
 - [使った技術](#使った技術)
 - [実装したもの](#実装したもの)
+- [実験設計の方針](#実験設計の方針)
 - [検証したことと結果](#検証したことと結果)
   - [1. Pi 5–Pico UART通信・telemetry評価](#1-pi-5pico-uart通信telemetry評価)
   - [2. Pi 5 loopbackでのUDP性能評価・障害検知・自己回復](#2-pi-5-loopbackでのudp性能評価障害検知自己回復)
@@ -53,15 +54,23 @@ UDP ベースの自己回復リンクを C で実装し、性能限界・障害�
 - **percentile算出**：nearest-rank規則を固定し、trial間で比較できる形に統一
 - **適応制御**：feedbackで観測したmissing率をもとに、rate制御・再送・XOR FECを実装して個別に効果測定
 
+## 実験設計の方針
+
+「速くなった / 直った」を主張する前に、比較可能な条件を先に固定した。
+
+- **1実験1因子**：共通baselineを `before` として使い回し、各実験では候補因子を1つだけ変える（[W08共通baseline条件](docs/w08/baseline_conditions.md)）
+- **3 trial以上**：単発の値では判断しない。W04では3 trialの `latency_p99_ms` が平均から全て±15%以内なら `reproducible=yes` と判定する基準を先に決めた
+- **percentile規則の固定**：nearest-rankに統一し、trial間・実験間で同じ意味の数値として比較できるようにした
+- **同一seed比較**：FEC ON/OFFのような効果測定では同じdrop seedを使い、条件差以外が動かないようにした
+- **最小構成から**：XOR FECは `k=4, r=1`（データ4 + parity 1、冗長度25%）を最小構成として実装し、単発欠落の回復能力を先に確認してから限界を調べた
+
 ## 検証したことと結果
 
 ### 1. Pi 5–Pico UART通信・telemetry評価
 
 **目的**：Pi 5とPico間のpacket通信を実機で成立させ、ACK、CRC、sequence、MCU内部stateを観測可能にする。loopbackやシミュレーションではなく、実際のMCUを含む経路で計測する。
 
-**実験方法**：packet formatを仕様として先に固定し、PC harness（Python）とMCU parser（C）を独立に実装。Pi 5からUART経由でDATA packetを送信し、PicoはACKを返しつつtelemetryをUSB CDCへ出力する。PC側の送受信ログとMCU内部カウンタを同一trialのCSVとして保存し、突き合わせて判定する。
-
-**結果のまとめ**：10 packetを送信し、**MCU側で全数受理、ACK 10件、payload完全一致10件、CRC error 0、sequence gap 0**を実測。`final_state=RUN`、`pass_fail=PASS`。判定はPC側の受信数ではなくMCU内部の`rx_data_count`を採用している。
+**実験方法**：packet formatを仕様として先に固定し、PC harness（Python）とMCU parser（C）を独立に実装。Pi 5からUART経由でDATA packetを送信し、PicoはACKを返しつつtelemetryをUSB CDCへ出力する。PC側の送受信ログとMCU内部カウンタを同一trialのCSVに保存し、突き合わせて判定する。判定は**PC側の受信数ではなくMCU内部の`rx_data_count`**を採用（`pass_fail=PASS`、`final_state=RUN`）。
 
 #### 1-1. UART packet通信の実機成立
 
@@ -93,13 +102,9 @@ UDP ベースの自己回復リンクを C で実装し、性能限界・障害�
 
 ### 2. Pi 5 loopbackでのUDP性能評価・障害検知・自己回復
 
-**目的**：1章で実機間通信の観測系を整えた後、物理ネットワークやMCU処理の影響を分離するため、Pi 5 loopbackでUDP処理・socket queue・スケジューリングの限界を切り分け、再現可能な計測基盤と障害検知を確立する。loopbackの結果は実ネットワークの品質そのものではなく、ホスト内の処理能力を評価するbaselineとして扱う。UART経路とloopbackを接続したend-to-end評価は次の課題とする。
+**目的**：物理ネットワークやMCU処理の影響を分離し、UDP処理・socket queue・スケジューリングの限界を切り分ける。**loopbackの結果は実ネットワークの品質ではなく、ホスト内の処理能力を評価するbaseline**として扱う。
 
-**実験方法**：Pi 5 loopbackで複数trialを実行し、再現性、outage、送信レート、socket buffer、CPU affinityを比較する。
-
-まず正常時の再現性を確認し、次に障害・負荷・処理資源の影響を順に切り分け、最後に欠落への回復策を評価する。
-
-**結果のまとめ**：120,000 Hzまでは欠落なし。3秒outageではFSMが復旧状態まで検出。bufferやaffinityはdrop・tail latency・再現性に影響した。
+**実験方法**：正常時の再現性 → 障害検知 → 負荷限界 → 処理資源 → 欠落回復の順に、条件を1つずつ変えて切り分ける。
 
 #### 2-1. 再現性評価
 
@@ -148,8 +153,6 @@ UDP ベースの自己回復リンクを C で実装し、性能限界・障害�
 
 **実験方法**：feedback packetを追加し、Adaptive Rate、Retransmit、XOR FECを実装。ON/OFF、同一drop seed、複数trialで比較する。
 
-**結果のまとめ**：Adaptive Rateは小幅改善、Retransmitは欠落回復と引き換えにlatency増加、XOR FECはrandom dropに対して約73%のeffective missing削減を確認した。
-
 ##### 2-6-1. Adaptive Rate
 
 - **やったこと**：feedbackでmissingを検出し、送信rateを動的に下げる制御を実装。
@@ -184,11 +187,9 @@ UDP ベースの自己回復リンクを C で実装し、性能限界・障害�
 
 ### 3. PicoでのBare-metal / FreeRTOSリアルタイム性評価
 
-**目的**：1章でPi 5–Pico間の通信観測系を作り、2章でPi 5側のUDP欠落・queue飽和・自己回復を確認した。3章では、その通信相手となるPico側が周期送信を安定して実行できるかを、Bare-metalとFreeRTOSで検証する。特に、RX処理やtask間通信がTX周期性へ与える影響を明らかにする。
+**目的**：通信相手となるPico側が周期送信を安定して実行できるかを検証する。特に**RX処理やtask間通信がTX周期性へ与える影響**を、Bare-metalとFreeRTOSで比較して明らかにする。
 
-**実験方法**：Picoで同一RX workloadをBare-metalとFreeRTOSで各3回実行し、TX jitter、queue hand-off、deadline missを測定。Pi 5 Linux user-space loopとも比較する。
-
-**結果のまとめ**：FreeRTOSではTX jitter P95/P99が0 µs、queue hand-off P95が8 µs、deadline missが0件。周期処理の分離効果を確認した。
+**実験方法**：同一RX workloadをBare-metalとFreeRTOSで各3回実行し、TX jitter、queue hand-off、deadline missを測定。Pi 5のLinux user-space loopとも比較する。
 
 #### 3-1. Bare-metal周期処理
 
@@ -227,8 +228,6 @@ UDP ベースの自己回復リンクを C で実装し、性能限界・障害�
 **目的**：正常系の計測が信用できるかを、意図的に壊して確かめる。どの故障がどのカウンタに現れるかを対応づけ、観測系が故障の種類を区別できるかを検証する。
 
 **実験方法**：preamble、length、header、CRC、payload の5箇所に故障を注入し、カウンタの反応パターンを比較。あわせて故障率を 0 / 1 / 5 / 10% と変えて `parse_ok_rate` の推移を測る。
-
-**結果のまとめ**：CRC故障とlength故障は単独カウンタで識別できたが、**preamble故障とheader故障は `trial_summary` だけでは区別できない**ことが判明した。観測系の限界を実測で確認できた点が成果。
 
 #### 4-1. 故障種別ごとのシグネチャ
 
