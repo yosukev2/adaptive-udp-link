@@ -39,10 +39,16 @@ SUMMARY_COLUMNS = [
 
 
 def read_csv_rows(path: Path) -> list[dict[str, str]]:
+    """Read a run log, ignoring the `#` comment lines the MCU emits.
+
+    The firmware prefixes its link configuration with `#` so a telemetry file
+    records the pins and baudrate it was captured on. Those lines precede the
+    header and would otherwise be read as the column names.
+    """
     if not path.exists():
         return []
     with path.open(newline="", encoding="utf-8") as f:
-        return list(csv.DictReader(f))
+        return list(csv.DictReader(line for line in f if not line.startswith("#")))
 
 
 def last_int(rows: list[dict[str, str]], key: str, default: int = 0) -> int:

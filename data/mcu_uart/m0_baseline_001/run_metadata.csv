@@ -1,0 +1,2 @@
+trial_id,test_name,firmware_version,baudrate,packet_count,payload_len,port,dry_run,hardware_observed,baseline_status,created_wall_ns
+m0_baseline_001,m0_baseline_10pkt,1321d35,115200,10,16,/dev/ttyAMA2,false,true,hardware_run,1785678029213790784
