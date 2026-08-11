@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="760" viewBox="0 0 1280 760">
+  <defs>
+    <style>
+      .title { font: 700 34px Arial, "Noto Sans JP", sans-serif; fill: #111; }
+      .panelTitle { font: 700 28px Arial, "Noto Sans JP", sans-serif; fill: #111; }
+      .boxTitle { font: 700 24px Arial, "Noto Sans JP", sans-serif; fill: #111; }
+      .longTitle { font: 700 24px Arial, "Noto Sans JP", sans-serif; fill: #111; }
+      .boxSub { font: 700 20px Arial, "Noto Sans JP", sans-serif; fill: #333; }
+      .label { font: 700 22px Arial, "Noto Sans JP", sans-serif; fill: #222; }
+      .summaryTitle { font: 700 22px Arial, "Noto Sans JP", sans-serif; fill: #111; }
+      .summaryText { font: 700 18px Arial, "Noto Sans JP", sans-serif; fill: #333; }
+      .panel { fill: #fff; stroke: #a5a5a5; stroke-width: 2; rx: 18; }
+      .task { fill: #f5f8fc; stroke: #4b79b8; stroke-width: 2.5; rx: 12; }
+      .summary { fill: #fff7e8; stroke: #b67a22; stroke-width: 2.5; rx: 12; }
+      .summaryPink { fill: #fdecef; stroke: #d8899b; stroke-width: 2.5; rx: 12; }
+      .arrow { stroke: #222; stroke-width: 3; fill: none; marker-end: url(#arrow); }
+      .loop { stroke: #222; stroke-width: 3; fill: none; marker-end: url(#arrow); }
+    </style>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#222"/>
+    </marker>
+  </defs>
+
+  <rect width="1280" height="760" fill="#ffffff"/>
+  <text x="640" y="48" text-anchor="middle" class="title">Bare-metal と FreeRTOS の処理構成</text>
+
+  <!-- Left panel -->
+  <rect x="40" y="80" width="570" height="640" class="panel"/>
+  <text x="325" y="122" text-anchor="middle" class="panelTitle">Bare-metal</text>
+
+  <rect x="95" y="145" width="460" height="64" class="summaryPink"/>
+  <text x="325" y="171" text-anchor="middle" class="summaryTitle">逐次処理</text>
+  <text x="325" y="195" text-anchor="middle" class="summaryText">RX → STATE → 周期TX を順番に実行</text>
+
+  <rect x="145" y="250" width="360" height="78" class="task"/>
+  <text x="325" y="298" text-anchor="middle" class="boxTitle">受信・検査処理</text>
+
+  <rect x="145" y="378" width="360" height="78" class="task"/>
+  <text x="325" y="426" text-anchor="middle" class="longTitle">結果の記録・状態管理処理</text>
+
+  <rect x="145" y="506" width="360" height="78" class="task"/>
+  <text x="325" y="554" text-anchor="middle" class="boxTitle">周期送信処理</text>
+
+  <path d="M325 328 L325 378" class="arrow"/>
+  <path d="M325 456 L325 506" class="arrow"/>
+  <path d="M325 584 L325 640 L105 640 L105 289 L145 289" class="loop"/>
+  <text x="120" y="625" class="label">繰り返し</text>
+
+  <!-- Right panel -->
+  <rect x="670" y="80" width="570" height="640" class="panel"/>
+  <text x="955" y="122" text-anchor="middle" class="panelTitle">FreeRTOS</text>
+
+  <rect x="725" y="145" width="460" height="64" class="summaryPink"/>
+  <text x="955" y="171" text-anchor="middle" class="summaryTitle">task分離 + priority制御 + queue通信</text>
+  <text x="955" y="195" text-anchor="middle" class="summaryText">TX周期を守りつつ、task間で情報を受け渡す</text>
+
+  <rect x="775" y="250" width="360" height="78" class="task"/>
+  <text x="955" y="282" text-anchor="middle" class="boxTitle">周期送信 task</text>
+  <text x="955" y="310" text-anchor="middle" class="boxSub">Priority 3</text>
+
+  <rect x="850" y="375" width="210" height="62" class="summary"/>
+  <text x="955" y="413" text-anchor="middle" class="boxTitle">Queue</text>
+
+  <rect x="775" y="475" width="360" height="78" class="task"/>
+  <text x="955" y="505" text-anchor="middle" class="longTitle">結果の記録・状態管理 task</text>
+  <text x="955" y="535" text-anchor="middle" class="boxSub">Priority 2</text>
+
+  <rect x="775" y="610" width="360" height="78" class="task"/>
+  <text x="955" y="640" text-anchor="middle" class="boxTitle">受信・検査 task</text>
+  <text x="955" y="670" text-anchor="middle" class="boxSub">Priority 1</text>
+
+  <path d="M955 328 L955 375" class="arrow"/>
+  <text x="1005" y="362" class="label">送信結果</text>
+
+  <path d="M955 437 L955 475" class="arrow"/>
+
+  <path d="M955 610 L955 553" class="arrow"/>
+  <text x="1005" y="585" class="label">受信結果</text>
+</svg>
