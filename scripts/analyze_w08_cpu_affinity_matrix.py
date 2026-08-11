@@ -24,8 +24,18 @@ from pathlib import Path
 from typing import Iterable
 
 import matplotlib.pyplot as plt
+import japanize_matplotlib
+
+plt.rcParams["font.family"] = "sans-serif"
+plt.rcParams["font.sans-serif"] = ["Meiryo", "Yu Gothic", "IPAexGothic"]
 
 csv.field_size_limit(sys.maxsize)
+
+AXIS_LABELS = {
+    "tx_pin": "TX固定core",
+    "rx_pin": "RX固定core",
+    "rate_hz": "送信レート (Hz)",
+}
 
 EXPECTED_FIELDS = [
     "rcv_time_ns",
@@ -382,6 +392,14 @@ def sort_pin(value: object) -> int:
     return 0 if value == "off" else 1
 
 
+def tick_label(key: str, value: object) -> str:
+    if key == "rate_hz":
+        rate = int(value)  # type: ignore[arg-type]
+        if rate % 1000 == 0:
+            return f"{rate // 1000}k"
+    return str(value)
+
+
 def make_matrix(rows: list[dict[str, object]], y_key: str, x_key: str, metric: str) -> tuple[list[object], list[object], list[list[float]]]:
     ys = sorted({row[y_key] for row in rows}, key=lambda v: int(v) if isinstance(v, int) else sort_pin(v))
     xs = sorted({row[x_key] for row in rows}, key=lambda v: int(v) if isinstance(v, int) else sort_pin(v))
@@ -393,15 +411,23 @@ def make_matrix(rows: list[dict[str, object]], y_key: str, x_key: str, metric: s
 
 
 def annotate(ax: plt.Axes, matrix: list[list[float]], fmt: str) -> None:
+    finite = [v for row in matrix for v in row if not math.isnan(v)]
+    vmin = min(finite) if finite else 0.0
+    vmax = max(finite) if finite else 0.0
+    span = vmax - vmin
     for y, row in enumerate(matrix):
         for x, value in enumerate(row):
             if math.isnan(value):
                 text = ""
-            elif fmt == "int":
-                text = f"{value:.0f}"
+                color = "black"
             else:
-                text = f"{value:.4f}"
-            ax.text(x, y, text, ha="center", va="center", fontsize=8, color="black")
+                if fmt == "int":
+                    text = f"{value:.0f}"
+                else:
+                    text = f"{value:.4f}"
+                norm = (value - vmin) / span if span > 0 else 0.0
+                color = "white" if norm > 0.6 else "black"
+            ax.text(x, y, text, ha="center", va="center", fontsize=8, color=color)
 
 
 def heatmap(
@@ -414,6 +440,8 @@ def heatmap(
     output: Path,
     cbar_label: str,
     fmt: str = "float",
+    caption: str | None = None,
+    title_fontsize: float | None = None,
 ) -> None:
     if not rows:
         return
@@ -421,15 +449,20 @@ def heatmap(
     width = max(6.5, 1.4 * len(xs) + 3.0)
     height = max(4.5, 0.65 * len(ys) + 2.2)
     fig, ax = plt.subplots(figsize=(width, height), constrained_layout=True)
-    image = ax.imshow(matrix, aspect="auto", cmap="viridis")
-    ax.set_title(title)
-    ax.set_xlabel(x_key)
-    ax.set_ylabel(y_key)
-    ax.set_xticks(range(len(xs)), [str(x) for x in xs])
-    ax.set_yticks(range(len(ys)), [str(y) for y in ys])
+    image = ax.imshow(matrix, aspect="auto", cmap="Blues")
+    if title_fontsize is None:
+        ax.set_title(title)
+    else:
+        ax.set_title(title, fontsize=title_fontsize)
+    ax.set_xlabel(AXIS_LABELS.get(x_key, x_key))
+    ax.set_ylabel(AXIS_LABELS.get(y_key, y_key))
+    ax.set_xticks(range(len(xs)), [tick_label(x_key, x) for x in xs])
+    ax.set_yticks(range(len(ys)), [tick_label(y_key, y) for y in ys])
     annotate(ax, matrix, fmt)
     cbar = fig.colorbar(image, ax=ax)
     cbar.set_label(cbar_label)
+    if caption:
+        fig.supxlabel(caption, fontsize=9, color="#52606D")
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output, dpi=160)
     plt.close(fig)
@@ -445,11 +478,11 @@ def selected_rates(rows: list[dict[str, object]]) -> list[int]:
 def generate_heatmaps(rows: list[dict[str, object]], fig_dir: Path) -> list[Path]:
     outputs: list[Path] = []
     metrics = [
-        ("missing_delta_total_avg", "missing_delta_total avg", "int"),
-        ("p99_latency_ms_avg", "p99 latency avg [ms]", "float"),
-        ("max_latency_ms_avg", "max latency avg [ms]", "float"),
-        ("last_edge_mean_latency_ms_avg", "last edge mean latency avg [ms]", "float"),
-        ("last_edge_minus_middle_mean_ms_avg", "last edge - middle mean [ms]", "float"),
+        ("missing_delta_total_avg", "欠落合計（3回平均）", "int"),
+        ("p99_latency_ms_avg", "P99遅延（3回平均）[ms]", "float"),
+        ("max_latency_ms_avg", "最大遅延（3回平均）[ms]", "float"),
+        ("last_edge_mean_latency_ms_avg", "末尾区間の平均遅延（3回平均）[ms]", "float"),
+        ("last_edge_minus_middle_mean_ms_avg", "末尾区間と中間区間の平均遅延差（3回平均）[ms]", "float"),
     ]
 
     tx_off = [row for row in rows if row["tx_pin"] == "off"]
@@ -460,10 +493,11 @@ def generate_heatmaps(rows: list[dict[str, object]], fig_dir: Path) -> list[Path
             y_key="rate_hz",
             x_key="rx_pin",
             metric=metric,
-            title=f"TX unpinned: RX pin x rate_hz ({label})",
+            title=f"TX固定なし: RX固定core×送信レートの\n{label}",
             output=output,
             cbar_label=label,
             fmt=fmt,
+            title_fontsize=10,
         )
         outputs.append(output)
 
@@ -475,10 +509,11 @@ def generate_heatmaps(rows: list[dict[str, object]], fig_dir: Path) -> list[Path
             y_key="rate_hz",
             x_key="tx_pin",
             metric=metric,
-            title=f"RX unpinned: TX pin x rate_hz ({label})",
+            title=f"RX固定なし: TX固定core×送信レートの\n{label}",
             output=output,
             cbar_label=label,
             fmt=fmt,
+            title_fontsize=10,
         )
         outputs.append(output)
 
@@ -491,10 +526,11 @@ def generate_heatmaps(rows: list[dict[str, object]], fig_dir: Path) -> list[Path
                 y_key="tx_pin",
                 x_key="rx_pin",
                 metric=metric,
-                title=f"rate_hz={rate}: RX pin x TX pin ({label})",
+                title=f"送信レート{rate // 1000} kHz: RX固定core×TX固定coreの\n{label}",
                 output=output,
                 cbar_label=label,
                 fmt=fmt,
+                title_fontsize=10,
             )
             outputs.append(output)
     return outputs

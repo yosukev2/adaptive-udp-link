@@ -432,8 +432,75 @@ def format_reduction(baremetal: float, freertos: float) -> tuple[float, float]:
     return reduction, percent
 
 
+FONT_FAMILY = "'Meiryo','Yu Gothic','Hiragino Sans','Noto Sans CJK JP',sans-serif"
+
+
+def render_discrete_distribution_png(
+    path: Path,
+    *,
+    title: str,
+    metric: str,
+    values: list[int],
+    color: str,
+    caption: str | None = None,
+    compact: bool = False,
+) -> None:
+    """Render the exact-value histogram as a PNG via matplotlib (Meiryo焼き込み)."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import japanize_matplotlib  # noqa: F401  (IPAexGothicのfallback登録)
+
+    plt.rcParams["font.family"] = "sans-serif"
+    plt.rcParams["font.sans-serif"] = ["Meiryo", "Yu Gothic", "IPAexGothic"]
+
+    counts = Counter(values)
+    categories = sorted(counts)
+    total = len(values)
+    max_log = math.log10(max(counts.values()) + 1)
+    heights = [math.log10(counts[v] + 1) for v in categories]
+
+    figsize = (7.6, 4.8) if compact else (9.6, 5.2)
+    dpi = 180 if compact else 150
+    fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
+    x = range(len(categories))
+    ax.bar(x, heights, width=0.68, color=color, zorder=3)
+    for i, v in enumerate(categories):
+        ax.text(i, heights[i] + max_log * 0.02, f"{counts[v]}",
+                ha="center", va="bottom", fontsize=10)
+    ax.set_xticks(list(x))
+    ax.set_xticklabels(
+        [f"{v}\n{counts[v] / total * 100.0:.2f}%" for v in categories], fontsize=10
+    )
+    fractions = (0.0, 0.25, 0.5, 0.75, 1.0)
+    ax.set_yticks([max_log * f for f in fractions])
+    ax.set_yticklabels([f"{round(10 ** (max_log * f) - 1)}" for f in fractions])
+    ax.set_ylim(0, max_log * 1.12)
+    if compact:
+        ax.margins(x=0.02)
+    ax.set_xlabel(f"{metric} (μs)", fontsize=12)
+    ax.set_ylabel("sample数（log目盛）", fontsize=12)
+    ax.set_title(
+        f"n={total}、barの高さはlog10(count + 1)",
+        fontsize=10,
+        fontweight="normal",
+        color="#555555",
+    )
+    fig.suptitle(title, fontsize=15, fontweight="bold")
+    ax.grid(axis="y", color="#dddddd", zorder=0)
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    if caption:
+        fig.tight_layout(rect=(0, 0.05, 1, 1))
+        fig.text(0.02, 0.012, caption, fontsize=9, color="#52606D", va="bottom")
+    else:
+        fig.tight_layout()
+    fig.savefig(path, facecolor="white", bbox_inches="tight")
+    plt.close(fig)
+
+
 def render_discrete_distribution_svg(
-    *, title: str, metric: str, values: list[int], color: str
+    *, title: str, metric: str, values: list[int], color: str, caption: str
 ) -> str:
     """Render an exact-value histogram with a logarithmic count axis."""
     counts = Counter(values)
@@ -441,6 +508,8 @@ def render_discrete_distribution_svg(
     total = len(values)
     width = 960
     height = 520
+    caption_height = 30
+    total_height = height + caption_height
     left = 90
     right = 30
     top = 75
@@ -452,11 +521,11 @@ def render_discrete_distribution_svg(
     bar_width = min(74.0, slot * 0.68)
 
     lines = [
-        '<svg xmlns="http://www.w3.org/2000/svg" width="960" height="520" viewBox="0 0 960 520" role="img">',
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{total_height}" viewBox="0 0 {width} {total_height}" role="img">',
         f"<title>{escape(title)}</title>",
-        '<rect width="960" height="520" fill="#ffffff"/>',
-        f'<text x="480" y="36" text-anchor="middle" font-family="sans-serif" font-size="22" font-weight="600">{escape(title)}</text>',
-        f'<text x="480" y="60" text-anchor="middle" font-family="sans-serif" font-size="13" fill="#555">n={total}; bar height uses log10(count + 1)</text>',
+        f'<rect width="{width}" height="{total_height}" fill="#ffffff"/>',
+        f'<text x="480" y="36" text-anchor="middle" font-family="{FONT_FAMILY}" font-size="22" font-weight="600">{escape(title)}</text>',
+        f'<text x="480" y="60" text-anchor="middle" font-family="{FONT_FAMILY}" font-size="13" fill="#555">n={total}、barの高さはlog10(count + 1)</text>',
         f'<line x1="{left}" y1="{top + plot_height}" x2="{left + plot_width}" y2="{top + plot_height}" stroke="#333"/>',
         f'<line x1="{left}" y1="{top}" x2="{left}" y2="{top + plot_height}" stroke="#333"/>',
     ]
@@ -467,7 +536,7 @@ def render_discrete_distribution_svg(
         lines.extend(
             [
                 f'<line x1="{left}" y1="{y:.1f}" x2="{left + plot_width}" y2="{y:.1f}" stroke="#dddddd"/>',
-                f'<text x="{left - 10}" y="{y + 4:.1f}" text-anchor="end" font-family="sans-serif" font-size="12" fill="#555">{count_hint}</text>',
+                f'<text x="{left - 10}" y="{y + 4:.1f}" text-anchor="end" font-family="{FONT_FAMILY}" font-size="12" fill="#555">{count_hint}</text>',
             ]
         )
 
@@ -481,16 +550,17 @@ def render_discrete_distribution_svg(
         lines.extend(
             [
                 f'<rect x="{x:.1f}" y="{y:.1f}" width="{bar_width:.1f}" height="{bar_height:.1f}" fill="{color}" rx="2"/>',
-                f'<text x="{center:.1f}" y="{max(top - 7, y - 7):.1f}" text-anchor="middle" font-family="sans-serif" font-size="11">{count}</text>',
-                f'<text x="{center:.1f}" y="{top + plot_height + 22}" text-anchor="middle" font-family="sans-serif" font-size="12">{value}</text>',
-                f'<text x="{center:.1f}" y="{top + plot_height + 42}" text-anchor="middle" font-family="sans-serif" font-size="10" fill="#555">{percent:.2f}%</text>',
+                f'<text x="{center:.1f}" y="{max(top - 7, y - 7):.1f}" text-anchor="middle" font-family="{FONT_FAMILY}" font-size="11">{count}</text>',
+                f'<text x="{center:.1f}" y="{top + plot_height + 22}" text-anchor="middle" font-family="{FONT_FAMILY}" font-size="12">{value}</text>',
+                f'<text x="{center:.1f}" y="{top + plot_height + 42}" text-anchor="middle" font-family="{FONT_FAMILY}" font-size="10" fill="#555">{percent:.2f}%</text>',
             ]
         )
 
     lines.extend(
         [
-            f'<text x="{left + plot_width / 2:.1f}" y="{height - 18}" text-anchor="middle" font-family="sans-serif" font-size="14">{escape(metric)} (us)</text>',
-            f'<text x="22" y="{top + plot_height / 2:.1f}" text-anchor="middle" font-family="sans-serif" font-size="14" transform="rotate(-90 22 {top + plot_height / 2:.1f})">sample count (log scale)</text>',
+            f'<text x="{left + plot_width / 2:.1f}" y="{height - 18}" text-anchor="middle" font-family="{FONT_FAMILY}" font-size="14">{escape(metric)} (µs)</text>',
+            f'<text x="22" y="{top + plot_height / 2:.1f}" text-anchor="middle" font-family="{FONT_FAMILY}" font-size="14" transform="rotate(-90 22 {top + plot_height / 2:.1f})">sample数（log目盛）</text>',
+            f'<text x="{left}" y="{height + 20}" text-anchor="start" font-family="{FONT_FAMILY}" font-size="12" fill="#52606D">{escape(caption)}</text>',
             "</svg>",
         ]
     )
@@ -501,33 +571,42 @@ def write_distribution_figures(figures_dir: Path, runs: list[RunData]) -> list[P
     figures_dir.mkdir(parents=True, exist_ok=True)
     specs = [
         (
-            figures_dir / "w07_baremetal_abs_jitter_distribution.svg",
-            "W07 bare-metal absolute jitter distribution",
-            "abs(jitter_us)",
+            figures_dir / "w07_baremetal_abs_jitter_distribution.png",
+            "Bare-metal 絶対jitter分布",
+            "絶対jitter",
             [value for item in runs if item.mode == "baremetal" for value in item.abs_jitter_us],
-            "#d97706",
+            "#2878B5",
+            None,
+            True,
         ),
         (
-            figures_dir / "w07_freertos_abs_jitter_distribution.svg",
-            "W07 FreeRTOS absolute jitter distribution",
-            "abs(jitter_us)",
+            figures_dir / "w07_freertos_abs_jitter_distribution.png",
+            "FreeRTOS 絶対jitter分布",
+            "絶対jitter",
             [value for item in runs if item.mode == "freertos" for value in item.abs_jitter_us],
-            "#2563eb",
+            "#2878B5",
+            None,
+            True,
         ),
         (
-            figures_dir / "w07_freertos_queue_latency_distribution.svg",
-            "W07 FreeRTOS queue latency distribution",
-            "queue_latency_us",
+            figures_dir / "w07_freertos_queue_latency_distribution.png",
+            "W07 FreeRTOS queue hand-off遅延分布",
+            "queue hand-off遅延",
             [value for item in runs if item.mode == "freertos" for value in item.queue_latency_us],
-            "#059669",
+            "#2878B5",
+            None,
+            False,
         ),
     ]
-    for path, title, metric, values, color in specs:
-        path.write_text(
-            render_discrete_distribution_svg(
-                title=title, metric=metric, values=values, color=color
-            ),
-            encoding="utf-8",
+    for path, title, metric, values, color, caption, compact in specs:
+        render_discrete_distribution_png(
+            path,
+            title=title,
+            metric=metric,
+            values=values,
+            color=color,
+            caption=caption,
+            compact=compact,
         )
     return [item[0] for item in specs]
 

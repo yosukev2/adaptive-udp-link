@@ -17,11 +17,11 @@
 
 Bars represent every distinct observed value. The count axis is logarithmic so rare outliers remain visible; the exact count and percentage are printed for each bar.
 
-![w07_baremetal_abs_jitter_distribution](figures/w07_baremetal_abs_jitter_distribution.svg)
+![w07_baremetal_abs_jitter_distribution](figures/w07_baremetal_abs_jitter_distribution.png)
 
-![w07_freertos_abs_jitter_distribution](figures/w07_freertos_abs_jitter_distribution.svg)
+![w07_freertos_abs_jitter_distribution](figures/w07_freertos_abs_jitter_distribution.png)
 
-![w07_freertos_queue_latency_distribution](figures/w07_freertos_queue_latency_distribution.svg)
+![w07_freertos_queue_latency_distribution](figures/w07_freertos_queue_latency_distribution.png)
 
 ## Run-level abs(jitter_us)
 

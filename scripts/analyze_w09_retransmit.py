@@ -238,6 +238,129 @@ def write_csv(rows: list[dict[str, object]], out: Path) -> None:
             writer.writerow({field: row.get(field, "") for field in fields})
 
 
+def read_csv(path: Path) -> list[dict[str, object]]:
+    with path.open(newline="", encoding="utf-8") as f:
+        return list(csv.DictReader(f))
+
+
+def write_figure(rows: list[dict[str, object]], output: Path) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import japanize_matplotlib  # noqa: F401  (IPAexGothicのfallback登録)
+    import matplotlib.pyplot as plt
+    from matplotlib.ticker import FuncFormatter
+
+    plt.rcParams["font.family"] = "sans-serif"
+    plt.rcParams["font.sans-serif"] = ["Meiryo", "Yu Gothic", "IPAexGothic"]
+    navy = "#16324F"
+    blue = "#2878B5"
+    light_blue = "#A8CCEA"
+    orange = "#F28E2B"
+    light_grid = "#D9E2EC"
+    plt.rcParams.update({
+        "axes.edgecolor": "#9AA5B1",
+        "axes.labelcolor": navy,
+        "axes.titlecolor": navy,
+        "axes.titleweight": "bold",
+        "figure.facecolor": "white",
+        "axes.facecolor": "white",
+        "grid.color": light_grid,
+        "grid.linewidth": 0.8,
+        "xtick.color": "#52606D",
+        "ytick.color": "#52606D",
+    })
+
+    modes = ("off", "on")
+    grouped = {mode: [row for row in rows if row.get("mode") == mode] for mode in modes}
+    if any(not grouped[mode] for mode in modes):
+        raise ValueError("comparison CSV must contain both off and on rows")
+
+    required = {"effective_missing_total", "avg_latency_ms"}
+    missing_columns = required.difference(rows[0])
+    if missing_columns:
+        raise ValueError(f"comparison CSV is missing columns: {', '.join(sorted(missing_columns))}")
+
+    effective = [
+        statistics.mean(to_int(row, "effective_missing_total") for row in grouped[mode])
+        for mode in modes
+    ]
+    avg_latency = [
+        statistics.mean(to_float(row, "avg_latency_ms") for row in grouped[mode])
+        for mode in modes
+    ]
+    x = [0, 1]
+    fig, ax_missing = plt.subplots(figsize=(8.8, 5.0))
+    bars = ax_missing.bar(
+        x,
+        effective,
+        width=0.58,
+        color=[light_blue, blue],
+        label="実効欠落数",
+        zorder=3,
+    )
+    ax_missing.bar_label(
+        bars,
+        labels=[f"{value:,.0f}" for value in effective],
+        padding=5,
+        color=navy,
+        fontsize=10,
+        fontweight="bold",
+    )
+    ax_missing.set_ylabel("実効欠落数 [frame]（3 trial平均）")
+    ax_missing.set_xticks(x, ["Retransmit OFF", "Retransmit ON"])
+    ax_missing.set_xlim(-0.42, 1.42)
+    ax_missing.set_ylim(0, max(effective) * 1.25)
+    ax_missing.yaxis.set_major_formatter(FuncFormatter(lambda value, _: f"{value:,.0f}"))
+    ax_missing.grid(axis="y", alpha=0.8, zorder=0)
+    ax_missing.spines[["top", "right"]].set_visible(False)
+
+    ax_latency = ax_missing.twinx()
+    latency_line, = ax_latency.plot(
+        x,
+        avg_latency,
+        color=orange,
+        linewidth=2.6,
+        marker="o",
+        markersize=8,
+        label="平均遅延",
+        zorder=4,
+    )
+    ax_latency.set_ylabel("平均遅延 [ms]（3 trial平均）", color=orange)
+    ax_latency.tick_params(axis="y", colors=orange)
+    ax_latency.spines["right"].set_color(orange)
+    ax_latency.spines["top"].set_visible(False)
+    ax_latency.set_ylim(0, max(avg_latency) * 1.25)
+    for index, value in enumerate(avg_latency):
+        ax_latency.annotate(
+            f"{value:.3f} ms",
+            (x[index], value),
+            xytext=(0, 11 if index == 0 else 9),
+            textcoords="offset points",
+            ha="center",
+            va="bottom",
+            color=orange,
+            fontsize=10,
+            fontweight="bold",
+        )
+
+    ax_missing.set_title(
+        "Retransmitによる実効欠落削減と遅延のトレードオフ",
+        fontweight="normal",
+    )
+    ax_missing.legend(
+        [bars, latency_line],
+        ["実効欠落数", "平均遅延"],
+        frameon=False,
+        loc="upper left",
+    )
+
+    fig.tight_layout()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output, dpi=180, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+
+
 def write_report(rows: list[dict[str, object]], report: Path, summary_csv: Path, data_dir: Path | None) -> None:
     off = aggregate(rows, "off")
     on = aggregate(rows, "on")
@@ -289,7 +412,20 @@ def main() -> int:
     parser.add_argument("--log-dir", default=None)
     parser.add_argument("--summary-csv", default="reports/w09_retransmit_comparison.csv")
     parser.add_argument("--report", default="reports/w09_retransmit_summary.md")
+    parser.add_argument("--figure", default="reports/figures/readme_retransmit_tradeoff.png")
+    parser.add_argument(
+        "--figure-only",
+        action="store_true",
+        help="generate the README figure from --summary-csv without rebuilding the CSV/report",
+    )
     args = parser.parse_args()
+
+    summary_csv = Path(args.summary_csv)
+    figure = Path(args.figure)
+    if args.figure_only:
+        write_figure(read_csv(summary_csv), figure)
+        print(figure)
+        return 0
 
     data_dir = Path(args.data_dir) if args.data_dir else None
     if data_dir:
@@ -307,12 +443,13 @@ def main() -> int:
             data_dir = None
     if not rows:
         raise SystemExit("no retransmit run data found")
-    summary_csv = Path(args.summary_csv)
     report = Path(args.report)
     write_csv(rows, summary_csv)
     write_report(rows, report, summary_csv, data_dir)
+    write_figure(rows, figure)
     print(report)
     print(summary_csv)
+    print(figure)
     return 0
 
 

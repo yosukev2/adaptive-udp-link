@@ -26,6 +26,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import japanize_matplotlib  # noqa: F401  (registers Japanese font)
+
+plt.rcParams["font.family"] = "sans-serif"
+plt.rcParams["font.sans-serif"] = ["Meiryo", "Yu Gothic", "IPAexGothic"]
 
 csv.field_size_limit(sys.maxsize)
 
@@ -288,8 +292,25 @@ def write_csv(path: Path, rows: list[dict[str, object]]) -> None:
         writer.writerows(rows)
 
 
+def format_si(value: object) -> str:
+    """Format 140000 -> 140k, 1000000 -> 1M, 4608 -> 4.6k; non-numeric passes through."""
+    try:
+        v = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return str(value)
+    if v >= 1_000_000:
+        scaled, unit = v / 1_000_000, "M"
+    elif v >= 1_000:
+        scaled, unit = v / 1_000, "k"
+    else:
+        return f"{v:g}"
+    if scaled == int(scaled):
+        return f"{int(scaled)}{unit}"
+    return f"{scaled:.1f}{unit}"
+
+
 def label_buf(requested: object, actual: object) -> str:
-    return f"{requested}/{actual}" if actual not in (None, "") else str(requested)
+    return f"{format_si(requested)}/{format_si(actual)}" if actual not in (None, "") else format_si(requested)
 
 
 def make_heatmap(rows: list[dict[str, object]], metric: str, output: Path, title: str, cbar_label: str, fmt: str) -> None:
@@ -303,23 +324,36 @@ def make_heatmap(rows: list[dict[str, object]], metric: str, output: Path, title
     matrix = [[lookup.get((rate, rcvbuf), math.nan) for rcvbuf in rcvbufs] for rate in rates]
 
     fig, ax = plt.subplots(figsize=(9.5, 5.5), constrained_layout=True)
-    image = ax.imshow(matrix, aspect="auto", cmap="viridis")
-    ax.set_title(title)
-    ax.set_xlabel("SO_RCVBUF requested/actual")
-    ax.set_ylabel("rate_hz")
-    ax.set_xticks(range(len(rcvbufs)), [labels[v] for v in rcvbufs], rotation=35, ha="right")
-    ax.set_yticks(range(len(rates)), [str(v) for v in rates])
+    image = ax.imshow(matrix, aspect="auto", cmap="Blues")
+    ax.set_title(title, fontsize=17, pad=14)
+    ax.set_xlabel("受信バッファ（要求値/実効値、byte）", fontsize=14, labelpad=10)
+    ax.set_ylabel("送信レート (Hz)", fontsize=14, labelpad=10)
+    ax.set_xticks(
+        range(len(rcvbufs)),
+        [labels[v] for v in rcvbufs],
+        rotation=35,
+        ha="right",
+        fontsize=11,
+    )
+    ax.set_yticks(range(len(rates)), [format_si(v) for v in rates], fontsize=11)
+    finite = [v for row in matrix for v in row if not math.isnan(v)]
+    vmin = min(finite) if finite else 0.0
+    vmax = max(finite) if finite else 1.0
+    span = vmax - vmin
     for y, row in enumerate(matrix):
         for x, value in enumerate(row):
             if math.isnan(value):
-                text = ""
-            elif fmt == "int":
+                continue
+            if fmt == "int":
                 text = f"{value:.0f}"
             else:
                 text = f"{value:.4f}"
-            ax.text(x, y, text, ha="center", va="center", fontsize=8, color="black")
+            norm = (value - vmin) / span if span else 0.0
+            color = "white" if norm > 0.6 else "black"
+            ax.text(x, y, text, ha="center", va="center", fontsize=9, color=color)
     cbar = fig.colorbar(image, ax=ax)
-    cbar.set_label(cbar_label)
+    cbar.set_label(cbar_label, fontsize=13, labelpad=10)
+    cbar.ax.tick_params(labelsize=11)
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output, dpi=160)
     plt.close(fig)
@@ -357,9 +391,9 @@ def main() -> int:
         args.fig_dir / "w08_socket_buffer_rate_rcvbuf_p99_latency_ms_avg.png",
         args.fig_dir / "w08_socket_buffer_rate_rcvbuf_max_latency_ms_avg.png",
     ]
-    make_heatmap(rows, "missing_delta_total_avg", figures[0], "rate_hz x SO_RCVBUF: missing_delta_total average", "missing_delta_total average", "int")
-    make_heatmap(rows, "p99_latency_ms_avg", figures[1], "rate_hz x SO_RCVBUF: p99 latency average", "p99 latency average [ms]", "float")
-    make_heatmap(rows, "max_latency_ms_avg", figures[2], "rate_hz x SO_RCVBUF: max latency average", "max latency average [ms]", "float")
+    make_heatmap(rows, "missing_delta_total_avg", figures[0], "受信バッファ単独sweepの欠落合計（3回平均）", "欠落合計（3回平均）", "int")
+    make_heatmap(rows, "p99_latency_ms_avg", figures[1], "受信バッファ単独sweepのP99遅延（3回平均）[ms]", "P99遅延（3回平均）[ms]", "float")
+    make_heatmap(rows, "max_latency_ms_avg", figures[2], "受信バッファ単独sweepの最大遅延（3回平均）[ms]", "最大遅延（3回平均）[ms]", "float")
 
     print(f"runs={len(runs)}")
     print(f"aggregate_rows={len(rows)}")

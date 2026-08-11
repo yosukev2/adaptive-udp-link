@@ -29,8 +29,35 @@ from pathlib import Path
 from typing import Iterable
 
 import matplotlib.pyplot as plt
+import japanize_matplotlib  # noqa: F401  (registers Japanese font)
+
+plt.rcParams["font.family"] = "sans-serif"
+plt.rcParams["font.sans-serif"] = ["Meiryo", "Yu Gothic", "IPAexGothic"]
 
 csv.field_size_limit(sys.maxsize)
+
+AXIS_LABELS = {
+    "rcvbuf_requested": "受信バッファ（要求値/実効値、byte）",
+    "sndbuf_requested": "送信バッファ（要求値/実効値、byte）",
+    "rate_hz": "送信レート (Hz)",
+}
+
+
+def format_si(value: object) -> str:
+    """Format 140000 -> 140k, 1000000 -> 1M, 4608 -> 4.6k; non-numeric passes through."""
+    try:
+        v = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return str(value)
+    if v >= 1_000_000:
+        scaled, unit = v / 1_000_000, "M"
+    elif v >= 1_000:
+        scaled, unit = v / 1_000, "k"
+    else:
+        return f"{v:g}"
+    if scaled == int(scaled):
+        return f"{int(scaled)}{unit}"
+    return f"{scaled:.1f}{unit}"
 
 EXPECTED_FIELDS = [
     "rcv_time_ns",
@@ -326,8 +353,8 @@ def run_to_dict(run: RunSummary) -> dict[str, object]:
 
 def label_buf(requested: object, actual: object) -> str:
     if actual is None or actual == "" or actual == "default":
-        return str(requested)
-    return f"{requested}/{actual}"
+        return format_si(requested)
+    return f"{format_si(requested)}/{format_si(actual)}"
 
 
 def make_matrix(rows: list[dict[str, object]], y_key: str, x_key: str, metric: str) -> tuple[list[object], list[object], list[list[float]]]:
@@ -339,17 +366,23 @@ def make_matrix(rows: list[dict[str, object]], y_key: str, x_key: str, metric: s
 
 
 def annotate_heatmap(ax: plt.Axes, matrix: list[list[float]], fmt: str) -> None:
+    finite = [v for row in matrix for v in row if not math.isnan(v)]
+    vmin = min(finite) if finite else 0.0
+    vmax = max(finite) if finite else 1.0
+    span = vmax - vmin
     for y, row in enumerate(matrix):
         for x, value in enumerate(row):
             if math.isnan(value):
-                text = ""
-            elif fmt == "int":
+                continue
+            if fmt == "int":
                 text = f"{value:.0f}"
             elif fmt == "rate":
                 text = f"{value:.3f}"
             else:
                 text = f"{value:.4f}"
-            ax.text(x, y, text, ha="center", va="center", fontsize=7, color="black")
+            norm = (value - vmin) / span if span else 0.0
+            color = "white" if norm > 0.6 else "black"
+            ax.text(x, y, text, ha="center", va="center", fontsize=9, color=color)
 
 
 def save_heatmap(
@@ -364,6 +397,7 @@ def save_heatmap(
     output: Path,
     colorbar_label: str,
     fmt: str,
+    caption: str | None = None,
 ) -> None:
     if not rows:
         return
@@ -371,17 +405,28 @@ def save_heatmap(
     width = max(7.0, 1.25 * len(xs) + 2.5)
     height = max(4.8, 0.7 * len(ys) + 2.0)
     fig, ax = plt.subplots(figsize=(width, height), constrained_layout=True)
-    image = ax.imshow(matrix, aspect="auto", cmap="viridis")
-    ax.set_xticks(range(len(xs)), [x_label_map.get(x, str(x)) for x in xs], rotation=35, ha="right")
-    ax.set_yticks(range(len(ys)), [y_label_map.get(y, str(y)) for y in ys])
-    ax.set_title(title)
-    ax.set_xlabel(x_key)
-    ax.set_ylabel(y_key)
+    image = ax.imshow(matrix, aspect="auto", cmap="Blues")
+    ax.set_xticks(
+        range(len(xs)),
+        [x_label_map.get(x, str(x)) for x in xs],
+        rotation=35,
+        ha="right",
+        fontsize=11,
+    )
+    ax.set_yticks(range(len(ys)), [y_label_map.get(y, str(y)) for y in ys], fontsize=11)
+    ax.set_title(title, fontsize=17, pad=14)
+    ax.set_xlabel(AXIS_LABELS.get(x_key, x_key), fontsize=14, labelpad=10)
+    ax.set_ylabel(AXIS_LABELS.get(y_key, y_key), fontsize=14, labelpad=10)
     annotate_heatmap(ax, matrix, fmt)
     cbar = fig.colorbar(image, ax=ax)
-    cbar.set_label(colorbar_label)
+    cbar.set_label(colorbar_label, fontsize=13, labelpad=10)
+    cbar.ax.tick_params(labelsize=11)
     output.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output, dpi=160)
+    if caption:
+        fig.text(0.5, -0.02, caption, ha="center", va="top", fontsize=9, color="#52606D")
+        fig.savefig(output, dpi=160, bbox_inches="tight")
+    else:
+        fig.savefig(output, dpi=160)
     plt.close(fig)
 
 
@@ -393,11 +438,11 @@ def generate_heatmaps(default_rows: list[dict[str, object]], txrx_rows: list[dic
         row["rcvbuf_requested"]: label_buf(row["rcvbuf_requested"], row.get("rcvbuf_actual"))
         for row in default_rows
     }
-    rate_label_map = {row["rate_hz"]: str(row["rate_hz"]) for row in default_rows}
+    rate_label_map = {row["rate_hz"]: format_si(row["rate_hz"]) for row in default_rows}
     for metric, label, fmt in [
-        ("missing_delta_total_avg", "missing_delta_total average", "int"),
-        ("p99_latency_ms_avg", "p99 latency average [ms]", "float"),
-        ("max_latency_ms_avg", "max latency average [ms]", "float"),
+        ("missing_delta_total_avg", "欠落合計（3回平均）", "int"),
+        ("p99_latency_ms_avg", "P99遅延（3回平均）[ms]", "float"),
+        ("max_latency_ms_avg", "最大遅延（3回平均）[ms]", "float"),
     ]:
         output = fig_dir / f"w08_socket_buffer_highrate_default_sndbuf_rxbuf_x_rate_{metric}.png"
         save_heatmap(
@@ -407,7 +452,7 @@ def generate_heatmaps(default_rows: list[dict[str, object]], txrx_rows: list[dic
             metric=metric,
             y_label_map=rate_label_map,
             x_label_map=rx_label_map,
-            title=f"default SO_SNDBUF: RX buffer x rate_hz ({label})",
+            title=f"受信バッファ×送信レートの{label}",
             output=output,
             colorbar_label=label,
             fmt=fmt,
@@ -426,9 +471,9 @@ def generate_heatmaps(default_rows: list[dict[str, object]], txrx_rows: list[dic
             for row in rows
         }
         for metric, label, fmt in [
-            ("missing_delta_total_avg", "missing_delta_total average", "int"),
-            ("p99_latency_ms_avg", "p99 latency average [ms]", "float"),
-            ("max_latency_ms_avg", "max latency average [ms]", "float"),
+            ("missing_delta_total_avg", "欠落合計（3回平均）", "int"),
+            ("p99_latency_ms_avg", "P99遅延（3回平均）[ms]", "float"),
+            ("max_latency_ms_avg", "最大遅延（3回平均）[ms]", "float"),
         ]:
             output = fig_dir / f"w08_socket_buffer_highrate_txrx_rate_{rate}_{metric}.png"
             save_heatmap(
@@ -438,7 +483,7 @@ def generate_heatmaps(default_rows: list[dict[str, object]], txrx_rows: list[dic
                 metric=metric,
                 y_label_map=tx_label_map,
                 x_label_map=rx_label_map,
-                title=f"rate_hz={rate}: RX buffer x TX buffer ({label})",
+                title=f"送信レート{rate / 1000:g} kHz: 受信バッファ×送信バッファの\n{label}",
                 output=output,
                 colorbar_label=label,
                 fmt=fmt,
